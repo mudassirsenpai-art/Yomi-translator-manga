@@ -29,11 +29,6 @@ jobs:
       - name: Setup System Dependencies
         run: |
           sudo apt-get update
-          # skia-python (used by MangaTranslator for text rendering) needs a full
-          # graphics/EGL stack even on a headless runner - libgl1 alone is not enough.
-          # NOTE: poppler-utils/pdftoppm has been removed - PDF extraction now uses
-          # PyMuPDF (pure Python, see below), which eliminated the container-level
-          # freezing that happened when pdftoppm was missing or choked on complex PDFs.
           sudo apt-get install -y \
             libgl1 \
             libegl1 \
@@ -56,23 +51,32 @@ jobs:
           rm -rf MangaTranslator
           git clone https://github.com/meangrinch/MangaTranslator.git
           cd MangaTranslator
-          # PyTorch must be installed explicitly - it is NOT in requirements.txt
-          # because it's hardware-specific (CPU/CUDA/ROCm/MPS). Without this,
-          # `import torch` inside main.py crashes immediately with
-          # ModuleNotFoundError, which silently kills every translation job.
           pip install torch==2.11.0 torchvision==0.26.0 --extra-index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
-          # Pillow: image stitching / tiling / PDF packaging
-          # numpy: row-flatness analysis for safe-cut Manhwa tiling
-          # PyMuPDF: pure-Python PDF page extraction (replaces pdftoppm)
-          # openai, pyrogram, tgcrypto: bot runtime deps
           pip install Pillow numpy openai pyrogram tgcrypto PyMuPDF
 
       - name: Verify Core Imports
         run: |
-          # Fail fast in CI instead of discovering a broken environment only
-          # when a real user job silently hangs mid-translation.
           python -c "import fitz; import PIL; import numpy; import pyrogram; import tgcrypto; print('core imports OK')"
+
+      # ---- DIAGNOSTIC STEP (temporary) ----
+      # This prints main.py's real --help output and the actual detection
+      # source code, so we can confirm - with certainty, not a guess -
+      # whether this installed version exposes any YOLO input-resolution
+      # control (imgsz / detection-size / similar). Once we have that
+      # answer, this step gets removed and replaced with the real fix.
+      - name: Diagnose YOLO detection resolution options
+        run: |
+          echo "===== main.py --help ====="
+          python MangaTranslator/main.py --help || true
+          echo ""
+          echo "===== core/detection.py ====="
+          if [ -f MangaTranslator/core/detection.py ]; then
+            cat MangaTranslator/core/detection.py
+          else
+            echo "core/detection.py not found - listing core/ instead:"
+            ls -la MangaTranslator/core/ || true
+          fi
 
       - name: Run Telegram Bot
         env:

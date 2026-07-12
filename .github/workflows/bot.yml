@@ -62,16 +62,17 @@ jobs:
           # ModuleNotFoundError, which silently kills every translation job.
           pip install torch==2.11.0 torchvision==0.26.0 --extra-index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
-          # Pillow: image stitching / PDF packaging
+          # Pillow: image stitching / tiling / PDF packaging
+          # numpy: row-flatness analysis for safe-cut Manhwa tiling
           # PyMuPDF: pure-Python PDF page extraction (replaces pdftoppm)
           # openai, pyrogram, tgcrypto: bot runtime deps
-          pip install Pillow openai pyrogram tgcrypto PyMuPDF
+          pip install Pillow numpy openai pyrogram tgcrypto PyMuPDF
 
       - name: Verify Core Imports
         run: |
           # Fail fast in CI instead of discovering a broken environment only
           # when a real user job silently hangs mid-translation.
-          python -c "import fitz; import PIL; import pyrogram; import tgcrypto; print('core imports OK')"
+          python -c "import fitz; import PIL; import numpy; import pyrogram; import tgcrypto; print('core imports OK')"
 
       - name: Run Telegram Bot
         env:

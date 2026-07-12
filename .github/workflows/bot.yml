@@ -29,7 +29,24 @@ jobs:
       - name: Setup System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1 unzip zip ffmpeg poppler-utils
+          # skia-python (used by MangaTranslator for text rendering) needs a full
+          # graphics/EGL stack even on a headless runner - libgl1 alone is not enough.
+          sudo apt-get install -y \
+            libgl1 \
+            libegl1 \
+            libgles2 \
+            libglx-mesa0 \
+            libgl1-mesa-dri \
+            libglu1-mesa \
+            libxi6 \
+            libxrender1 \
+            libxrandr2 \
+            libxfixes3 \
+            libxcursor1 \
+            libxdamage1 \
+            libxcomposite1 \
+            libxkbcommon0 \
+            unzip zip ffmpeg poppler-utils
 
       - name: Clone & Setup MangaTranslator Core
         run: |

@@ -196,6 +196,36 @@ def git_commit_data(message):
         print(f"⚠️ Git persistence skipped: {e}")
 
 
+# ================= Limits =================
+PROMPT_NAME_MAX_LEN = 32  # only limit that exists anywhere in this bot
+
+# ================= Safe Telegram UI Helpers =================
+# Prevents "stuck button" bug: Telegram keeps a button's loading spinner active
+# until callback_query.answer() is called, and if edit_text() throws (e.g.
+# "message is not modified" or a network hiccup) the handler used to crash
+# before ever answering the query, leaving the old menu frozen on screen.
+async def safe_edit(message, text, reply_markup=None):
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+    except Exception as e:
+        err = str(e).lower()
+        if "not modified" in err:
+            return  # content identical, nothing to do
+        # Any other failure: try to at least refresh the markup, else swallow
+        try:
+            await message.edit_text(text + " ", reply_markup=reply_markup)
+        except Exception as e2:
+            print(f"⚠️ safe_edit failed: {e2}")
+
+async def safe_answer(query, text=None, show_alert=False):
+    try:
+        if text:
+            await query.answer(text, show_alert=show_alert)
+        else:
+            await query.answer()
+    except Exception as e:
+        print(f"⚠️ safe_answer failed: {e}")
+
 # ================= Auth Gate Filter =================
 async def auth_check(_, __, message):
     return message.from_user.id in AUTHORIZED_USERS
@@ -373,25 +403,31 @@ async def handle_callbacks(client, query: CallbackQuery):
     user_id = query.from_user.id
     cfg = get_user_config(user_id)
 
+    # Answer immediately so the button never stays stuck in a loading state,
+    # even if something below raises. Branches that want a custom toast text
+    # call safe_answer(query, "...") again later, which is harmless (Telegram
+    # ignores a second answer silently on the client side after the first).
+    await safe_answer(query)
+
     # ---------- Main Menu ----------
     if data == "main_menu":
-        await query.message.edit_text("🛠 **Settings**\nChoose a category to configure:", reply_markup=kb_main_menu())
+        await safe_edit(query.message, "🛠 **Settings**\nChoose a category to configure:", reply_markup=kb_main_menu())
         return
 
     # ---------- Language Menu ----------
     if data == "menu_lang":
-        await query.message.edit_text(
+        await safe_edit(query.message, 
             f"🌐 **Language Settings**\nSource: `{cfg['source_lang_label']}`\nTarget: `{cfg['target_lang_label']}`\n\nTap a field to change it:",
             reply_markup=kb_lang_root(cfg)
         )
         return
 
     if data == "lang_src_open":
-        await query.message.edit_text("🌐 **Select Source Language:**", reply_markup=kb_source_select(cfg))
+        await safe_edit(query.message, "🌐 **Select Source Language:**", reply_markup=kb_source_select(cfg))
         return
 
     if data == "lang_tgt_open":
-        await query.message.edit_text("🌐 **Select Target Language:**", reply_markup=kb_target_select(cfg))
+        await safe_edit(query.message, "🌐 **Select Target Language:**", reply_markup=kb_target_select(cfg))
         return
 
     if data.startswith("srcset_"):
@@ -400,8 +436,8 @@ async def handle_callbacks(client, query: CallbackQuery):
         cfg["source_lang"] = code
         cfg["source_lang_label"] = label
         await save_user_config(user_id)
-        await query.answer(f"Source set to {label}")
-        await query.message.edit_text(
+        await safe_answer(query, f"Source set to {label}")
+        await safe_edit(query.message, 
             f"🌐 **Language Settings**\nSource: `{cfg['source_lang_label']}`\nTarget: `{cfg['target_lang_label']}`\n\nTap a field to change it:",
             reply_markup=kb_lang_root(cfg)
         )
@@ -411,14 +447,14 @@ async def handle_callbacks(client, query: CallbackQuery):
         value = data.split("_", 1)[1]
         if value == "custom":
             awaiting_reply[user_id] = {"type": "custom_lang"}
-            await query.message.edit_text("✍️ **Reply to this message with your target language name.**")
+            await safe_edit(query.message, "✍️ **Reply to this message with your target language name.**")
             return
         label = next((l for l, v in TARGET_LANGS if v == value), value)
         cfg["target_lang"] = value
         cfg["target_lang_label"] = label
         await save_user_config(user_id)
-        await query.answer(f"Target set to {label}")
-        await query.message.edit_text(
+        await safe_answer(query, f"Target set to {label}")
+        await safe_edit(query.message, 
             f"🌐 **Language Settings**\nSource: `{cfg['source_lang_label']}`\nTarget: `{cfg['target_lang_label']}`\n\nTap a field to change it:",
             reply_markup=kb_lang_root(cfg)
         )
@@ -430,20 +466,20 @@ async def handle_callbacks(client, query: CallbackQuery):
         body = "🔡 **Font Track**\n"
         body += f"Selected: `{cfg.get('font_name') or 'none'}`\n\n"
         body += "Library:\n" + ("\n".join(f"• {f}" for f in fonts) if fonts else "_empty_")
-        await query.message.edit_text(body, reply_markup=kb_font_menu(cfg))
+        await safe_edit(query.message, body, reply_markup=kb_font_menu(cfg))
         return
 
     if data == "font_add":
         awaiting_reply[user_id] = {"type": "font_upload"}
-        await query.message.edit_text("📤 **Upload your font now** (.ttf or .otf).\nSend it as a document reply, or just send the file directly in chat.")
+        await safe_edit(query.message, "📤 **Upload your font now** (.ttf or .otf).\nSend it as a document reply, or just send the file directly in chat.")
         return
 
     if data.startswith("fontsel_"):
         name = data.split("_", 1)[1]
         cfg["font_name"] = name
         await save_user_config(user_id)
-        await query.answer(f"Font set to {name}")
-        await query.message.edit_text(
+        await safe_answer(query, f"Font set to {name}")
+        await safe_edit(query.message, 
             f"🔡 **Font Track**\nSelected: `{cfg['font_name']}`\n\nLibrary:\n" +
             "\n".join(f"• {f}" for f in list_fonts()),
             reply_markup=kb_font_menu(cfg)
@@ -456,49 +492,49 @@ async def handle_callbacks(client, query: CallbackQuery):
         if cfg.get("font_name") == name:
             cfg["font_name"] = None
             await save_user_config(user_id)
-        await query.answer(f"Deleted {name}")
+        await safe_answer(query, f"Deleted {name}")
         fonts = list_fonts()
         body = "🔡 **Font Track**\n" + f"Selected: `{cfg.get('font_name') or 'none'}`\n\nLibrary:\n" + \
                ("\n".join(f"• {f}" for f in fonts) if fonts else "_empty_")
-        await query.message.edit_text(body, reply_markup=kb_font_menu(cfg))
+        await safe_edit(query.message, body, reply_markup=kb_font_menu(cfg))
         return
 
     # ---------- API / Provider Menu ----------
     if data == "menu_api":
-        await query.message.edit_text(
+        await safe_edit(query.message, 
             "⚙️ **Provider & API Configuration**",
             reply_markup=kb_api_menu(cfg)
         )
         return
 
     if data == "api_provider_open":
-        await query.message.edit_text("⚙️ **Select Provider:**", reply_markup=kb_provider_select(cfg))
+        await safe_edit(query.message, "⚙️ **Select Provider:**", reply_markup=kb_provider_select(cfg))
         return
 
     if data.startswith("provset_"):
         provider = data.split("_", 1)[1]
         cfg["provider"] = provider
         await save_user_config(user_id)
-        await query.answer(f"Provider set to {provider}")
-        await query.message.edit_text("⚙️ **Provider & API Configuration**", reply_markup=kb_api_menu(cfg))
+        await safe_answer(query, f"Provider set to {provider}")
+        await safe_edit(query.message, "⚙️ **Provider & API Configuration**", reply_markup=kb_api_menu(cfg))
         return
 
     if data.startswith("api_field_"):
         field = data.split("api_field_", 1)[1]  # api_url / api_key / model_name
         pretty = {"api_url": "Base URL", "api_key": "API Key", "model_name": "Model ID"}.get(field, field)
         awaiting_reply[user_id] = {"type": "api_field", "extra": {"field": field}}
-        await query.message.edit_text(f"✍️ **Reply to this message with the new {pretty}.**")
+        await safe_edit(query.message, f"✍️ **Reply to this message with the new {pretty}.**")
         return
 
     # ---------- Prompt Library Menu ----------
     if data == "menu_prompt":
-        await query.message.edit_text("📝 **Prompt Library**\nSystem prompt = model behaviour. User prompt = your custom focus.", reply_markup=kb_prompt_root())
+        await safe_edit(query.message, "📝 **Prompt Library**\nSystem prompt = model behaviour. User prompt = your custom focus.", reply_markup=kb_prompt_root())
         return
 
     if data == "prompt_open_system" or data == "prompt_open_user":
         kind = "system" if data.endswith("system") else "user"
         selected = cfg["system_prompt_name"] if kind == "system" else cfg["user_prompt_name"]
-        await query.message.edit_text(f"📝 **{kind.title()} Prompts**\nSelected: `{selected}`", reply_markup=kb_prompt_list(kind, cfg))
+        await safe_edit(query.message, f"📝 **{kind.title()} Prompts**\nSelected: `{selected}`", reply_markup=kb_prompt_list(kind, cfg))
         return
 
     if data.startswith("promptsel_"):
@@ -512,8 +548,8 @@ async def handle_callbacks(client, query: CallbackQuery):
                 cfg["user_prompt_name"] = name
                 cfg["user_prompt_text"] = lib[name]
             await save_user_config(user_id)
-            await query.answer(f"Selected: {name}")
-        await query.message.edit_text(f"📝 **{kind.title()} Prompts**\nSelected: `{name}`", reply_markup=kb_prompt_list(kind, cfg))
+            await safe_answer(query, f"Selected: {name}")
+        await safe_edit(query.message, f"📝 **{kind.title()} Prompts**\nSelected: `{name}`", reply_markup=kb_prompt_list(kind, cfg))
         return
 
     if data.startswith("promptdel_"):
@@ -531,29 +567,29 @@ async def handle_callbacks(client, query: CallbackQuery):
                 cfg["user_prompt_name"] = fallback_name
                 cfg["user_prompt_text"] = lib[fallback_name]
                 await save_user_config(user_id)
-            await query.answer(f"Deleted {name}")
+            await safe_answer(query, f"Deleted {name}")
         else:
-            await query.answer("Can't delete the last remaining prompt.", show_alert=True)
-        await query.message.edit_text(f"📝 **{kind.title()} Prompts**", reply_markup=kb_prompt_list(kind, cfg))
+            await safe_answer(query, "Can't delete the last remaining prompt.", show_alert=True)
+        await safe_edit(query.message, f"📝 **{kind.title()} Prompts**", reply_markup=kb_prompt_list(kind, cfg))
         return
 
     if data.startswith("prompt_add_"):
         kind = data.split("prompt_add_", 1)[1]
         awaiting_reply[user_id] = {"type": "prompt_name", "extra": {"kind": kind}}
-        await query.message.edit_text(f"✍️ **Reply to this message with a name for the new {kind} prompt.**")
+        await safe_edit(query.message, f"✍️ **Reply to this message with a name for the new {kind} prompt.**")
         return
 
     # ---------- Output Format Menu ----------
     if data == "menu_output":
-        await query.message.edit_text(f"📦 **Output Format**\nCurrent: `{cfg['output_format']}`", reply_markup=kb_output_menu(cfg))
+        await safe_edit(query.message, f"📦 **Output Format**\nCurrent: `{cfg['output_format']}`", reply_markup=kb_output_menu(cfg))
         return
 
     if data.startswith("outset_"):
         code = data.split("_", 1)[1]
         cfg["output_format"] = code
         await save_user_config(user_id)
-        await query.answer(f"Output set to .{code}")
-        await query.message.edit_text(f"📦 **Output Format**\nCurrent: `{cfg['output_format']}`", reply_markup=kb_output_menu(cfg))
+        await safe_answer(query, f"Output set to .{code}")
+        await safe_edit(query.message, f"📦 **Output Format**\nCurrent: `{cfg['output_format']}`", reply_markup=kb_output_menu(cfg))
         return
 
     # ---------- Upload Mode Selection (/translate flow) ----------
@@ -566,12 +602,12 @@ async def handle_callbacks(client, query: CallbackQuery):
             "archive": "Ab apni ZIP ya CBZ file(s) bhejo. Multiple bhi bhej sakte ho. Jab complete ho jaye, `/end` bhejo.",
             "pdf": "Ab apni PDF file(s) bhejo. Multiple bhi bhej sakte ho. Jab complete ho jaye, `/end` bhejo.",
         }.get(mode, "Files bhejo, phir /end bhejo.")
-        await query.message.edit_text(f"📥 **Upload mode:** `{mode}`\n{hint}")
+        await safe_edit(query.message, f"📥 **Upload mode:** `{mode}`\n{hint}")
         return
 
     # ---------- Job Pipeline Controls ----------
     if data == "start_pipeline":
-        await query.message.edit_text("🔄 Initializing translation pipeline...")
+        await safe_edit(query.message, "🔄 Initializing translation pipeline...")
         active_jobs[user_id] = {"cancel": False, "status_msg": query.message}
         asyncio.create_task(execute_manga_pipeline(client, query.message, user_id))
         return
@@ -580,15 +616,15 @@ async def handle_callbacks(client, query: CallbackQuery):
         job = active_jobs.get(user_id)
         if job:
             job["cancel"] = True
-            await query.answer("Cancelling...")
+            await safe_answer(query, "Cancelling...")
         return
 
     if data == "job_continue":
         job_state = paused_jobs.get(user_id)
         if not job_state:
-            await query.answer("No paused job found.", show_alert=True)
+            await safe_answer(query, "No paused job found.", show_alert=True)
             return
-        await query.message.edit_text("▶️ Resuming translation...")
+        await safe_edit(query.message, "▶️ Resuming translation...")
         active_jobs[user_id] = {"cancel": False, "status_msg": query.message}
         asyncio.create_task(resume_manga_pipeline(client, query.message, user_id))
         return
@@ -596,7 +632,7 @@ async def handle_callbacks(client, query: CallbackQuery):
     if data == "job_send_partial":
         job_state = paused_jobs.get(user_id)
         if not job_state:
-            await query.answer("No paused job found.", show_alert=True)
+            await safe_answer(query, "No paused job found.", show_alert=True)
             return
         await send_partial_results(client, query.message, user_id)
         return
@@ -674,8 +710,11 @@ async def handle_reply_capture(client, message: Message):
 
     if kind == "prompt_name":
         prompt_kind = pending_reply["extra"]["kind"]
+        if len(text) > PROMPT_NAME_MAX_LEN:
+            await message.reply_text(f"❌ Naam {PROMPT_NAME_MAX_LEN} characters se zyada nahi ho sakta (`{len(text)}` diya). Dobara reply karo.")
+            return
         awaiting_reply[user_id] = {"type": "prompt_body", "extra": {"kind": prompt_kind, "name": text}}
-        await message.reply_text(f"✍️ **Reply to this message with the {prompt_kind} prompt text for** `{text}`.")
+        await message.reply_text(f"✍️ **Reply to this message with the {prompt_kind} prompt text for** `{text}`.\n_(No length limit — likho jitna chahiye.)_")
         return
 
     if kind == "prompt_body":
@@ -761,7 +800,7 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
     queue = pending_files.get(user_id)
 
     if not queue or not queue["files"]:
-        await status_msg.edit_text("❌ Error: No files found in queue. Send `/translate` again.")
+        await safe_edit(status_msg, "❌ Error: No files found in queue. Send `/translate` again.")
         active_jobs.pop(user_id, None)
         return
 
@@ -801,7 +840,7 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
         input_dir = os.path.join(job_root, f"input_{file_idx:03d}")
         os.makedirs(input_dir, exist_ok=True)
 
-        await status_msg.edit_text(build_status_text(mode_label, "📥 Downloading payload", file_idx, total_files, 0, 0, 5))
+        await safe_edit(status_msg, build_status_text(mode_label, "📥 Downloading payload", file_idx, total_files, 0, 0, 5))
         downloaded_path = await source_message.download(file_name=os.path.join(job_root, f"src_{file_idx:03d}"))
 
         # Renaming: pyrogram won't preserve extension automatically for arbitrary file_name, so fix it.
@@ -813,7 +852,7 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             downloaded_path = fixed_path
 
         # Extraction based on mode
-        await status_msg.edit_text(build_status_text(mode_label, "📂 Extracting", file_idx, total_files, 0, 0, 15))
+        await safe_edit(status_msg, build_status_text(mode_label, "📂 Extracting", file_idx, total_files, 0, 0, 15))
         if mode == "archive" or downloaded_path.lower().endswith(('.zip', '.cbz')):
             extract_archive(downloaded_path, input_dir)
         elif mode == "pdf" or downloaded_path.lower().endswith('.pdf'):
@@ -825,7 +864,7 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
         total_images = len(ordered_map)
 
         if total_images == 0:
-            await status_msg.edit_text(f"⚠️ File {file_idx}/{total_files}: no valid images found, skipping.")
+            await safe_edit(status_msg, f"⚠️ File {file_idx}/{total_files}: no valid images found, skipping.")
             continue
 
         dynamic_system_instruction = build_dynamic_system_instruction(cfg)
@@ -854,7 +893,7 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             "--special-instructions", dynamic_system_instruction
         ]
 
-        await status_msg.edit_text(
+        await safe_edit(status_msg, 
             build_status_text(mode_label, "🧠 OCR + Translation running", file_idx, total_files, 0, total_images, 40),
             reply_markup=kb_cancel_only()
         )
@@ -876,16 +915,16 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
                 except asyncio.TimeoutError:
                     done_count = len([f for f in os.listdir(file_translated_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]) if os.path.exists(file_translated_dir) else 0
                     pct = 40 + int((done_count / max(total_images, 1)) * 40)
-                    await status_msg.edit_text(
+                    await safe_edit(status_msg, 
                         build_status_text(mode_label, "🧠 OCR + Translation running", file_idx, total_files, done_count, total_images, min(pct, 80)),
                         reply_markup=kb_cancel_only()
                     )
         except Exception as exec_err:
-            await status_msg.edit_text(f"❌ Engine error on file {file_idx}/{total_files}: {exec_err}")
+            await safe_edit(status_msg, f"❌ Engine error on file {file_idx}/{total_files}: {exec_err}")
             active_jobs.pop(user_id, None)
             return
 
-        await status_msg.edit_text(build_status_text(mode_label, "📦 Packaging output", file_idx, total_files, total_images, total_images, 90))
+        await safe_edit(status_msg, build_status_text(mode_label, "📦 Packaging output", file_idx, total_files, total_images, total_images, 90))
 
         output_path = package_output(file_translated_dir, job_root, file_idx, cfg['output_format'])
         all_translated_outputs.append((file_idx, output_path))
@@ -900,7 +939,7 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             )
         )
 
-    await status_msg.edit_text(f"✅ **All {total_files} file(s) translated and sent!**")
+    await safe_edit(status_msg, f"✅ **All {total_files} file(s) translated and sent!**")
     active_jobs.pop(user_id, None)
     pending_files.pop(user_id, None)
     paused_jobs.pop(user_id, None)
@@ -942,7 +981,7 @@ async def handle_job_cancelled(client, status_msg, user_id, translated_dir, file
         "total_files": total_files,
     }
     active_jobs.pop(user_id, None)
-    await status_msg.edit_text(
+    await safe_edit(status_msg, 
         "🛑 **Translation stopped.**\nProgress so far has been saved.\nWhat would you like to do?",
         reply_markup=kb_resume_options()
     )
@@ -954,7 +993,7 @@ async def resume_manga_pipeline(client, status_msg, user_id):
 async def send_partial_results(client, status_msg, user_id):
     state = paused_jobs.get(user_id)
     if not state:
-        await status_msg.edit_text("❌ No paused job data found.")
+        await safe_edit(status_msg, "❌ No paused job data found.")
         return
     translated_dir = state["translated_dir"]
     if os.path.exists(translated_dir) and os.listdir(translated_dir):
@@ -967,7 +1006,7 @@ async def send_partial_results(client, status_msg, user_id):
         )
         os.remove(f"{archive_base}.zip")
     else:
-        await status_msg.edit_text("⚠️ No translated files available yet.")
+        await safe_edit(status_msg, "⚠️ No translated files available yet.")
     paused_jobs.pop(user_id, None)
     pending_files.pop(user_id, None)
 

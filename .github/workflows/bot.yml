@@ -29,6 +29,8 @@ jobs:
       - name: Setup System Dependencies
         run: |
           sudo apt-get update
+          # skia-python (used by MangaTranslator for text rendering) needs a full
+          # graphics/EGL stack even on a headless runner - libgl1 alone is not enough.
           sudo apt-get install -y \
             libgl1 \
             libegl1 \
@@ -51,29 +53,19 @@ jobs:
           rm -rf MangaTranslator
           git clone https://github.com/meangrinch/MangaTranslator.git
           cd MangaTranslator
+          # PyTorch must be installed explicitly - it is NOT in requirements.txt
+          # because it's hardware-specific (CPU/CUDA/ROCm/MPS).
           pip install torch==2.11.0 torchvision==0.26.0 --extra-index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
+          # Pillow: image stitching / tiling / PDF packaging
+          # numpy: row-flatness analysis for safe-cut Manhwa tiling
+          # PyMuPDF: pure-Python PDF page extraction (replaces pdftoppm)
+          # openai, pyrogram, tgcrypto: bot runtime deps
           pip install Pillow numpy openai pyrogram tgcrypto PyMuPDF
 
       - name: Verify Core Imports
         run: |
           python -c "import fitz; import PIL; import numpy; import pyrogram; import tgcrypto; print('core imports OK')"
-
-      # ---- DIAGNOSTIC STEP (temporary), round 3 ----
-      # Round 2 confirmed the real detector lives at core/image/detection.py
-      # (imported as `from .image.detection import detect_panels,
-      # detect_speech_bubbles` in pipeline.py). scaling.py was just generic
-      # math helpers, not the detector itself. This round pulls the real file.
-      - name: Diagnose YOLO detection resolution options (round 3)
-        run: |
-          echo "===== core/image/detection.py (full file) ====="
-          cat MangaTranslator/core/image/detection.py || true
-          echo ""
-          echo "===== core/image/ directory listing ====="
-          ls -la MangaTranslator/core/image/ || true
-          echo ""
-          echo "===== core/config.py: lines mentioning bubble/context/max_side/min_side ====="
-          grep -n -i "bubble_min_side\|context_image_max_side\|max_side\|min_side\|imgsz" MangaTranslator/core/config.py || true
 
       - name: Run Telegram Bot
         env:
@@ -81,4 +73,10 @@ jobs:
           API_HASH: ${{ secrets.API_HASH }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           AUTHORIZED_USERS: ${{ secrets.AUTHORIZED_USERS }}
+          # Needed for OSB (Outside Speech Bubble) model download from HF Hub.
+          # Without this, the download is unauthenticated and can hit HF's
+          # anonymous rate limit on GitHub's shared runner IPs, which is what
+          # was surfacing as the earlier "unauthenticated requests" warning.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python bot.py

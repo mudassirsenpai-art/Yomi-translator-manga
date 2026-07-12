@@ -731,23 +731,47 @@ async def handle_reply_capture(client, message: Message):
         if len(text) > PROMPT_NAME_MAX_LEN:
             await message.reply_text(f"❌ Naam {PROMPT_NAME_MAX_LEN} characters se zyada nahi ho sakta (`{len(text)}` diya). Dobara reply karo.")
             return
-        awaiting_reply[user_id] = {"type": "prompt_body", "extra": {"kind": prompt_kind, "name": text}}
-        await message.reply_text(f"✍️ **Reply to this message with the {prompt_kind} prompt text for** `{text}`.\n_(No length limit — likho jitna chahiye.)_")
+        awaiting_reply[user_id] = {"type": "prompt_body", "extra": {"kind": prompt_kind, "name": text, "parts": []}}
+        await message.reply_text(
+            f"✍️ **Reply to this message with the {prompt_kind} prompt text for** `{text}`.\n\n"
+            f"_Agar prompt Telegram ki 4096 character limit se bada hai, usse multiple messages mein todkar "
+            f"reply karo (har hissa isi message ko reply karke bhejo). Jab sab bhej do, `/donedone` reply karo._"
+        )
         return
 
     if kind == "prompt_body":
         prompt_kind = pending_reply["extra"]["kind"]
         name = pending_reply["extra"]["name"]
-        add_prompt(prompt_kind, name, text)
-        if prompt_kind == "system":
-            cfg["system_prompt_name"] = name
-            cfg["system_prompt_text"] = text
-        else:
-            cfg["user_prompt_name"] = name
-            cfg["user_prompt_text"] = text
-        await save_user_config(user_id)
-        awaiting_reply.pop(user_id, None)
-        await message.reply_text(f"✅ Prompt `{name}` added and selected.", reply_markup=kb_prompt_list(prompt_kind, cfg))
+        parts = pending_reply["extra"].setdefault("parts", [])
+
+        if text.strip() == "/donedone":
+            if not parts:
+                await message.reply_text("❌ Koi prompt text abhi tak nahi mila. Pehle text reply karo, phir `/donedone`.")
+                return
+            full_text = "".join(parts)
+            add_prompt(prompt_kind, name, full_text)
+            if prompt_kind == "system":
+                cfg["system_prompt_name"] = name
+                cfg["system_prompt_text"] = full_text
+            else:
+                cfg["user_prompt_name"] = name
+                cfg["user_prompt_text"] = full_text
+            await save_user_config(user_id)
+            awaiting_reply.pop(user_id, None)
+            await message.reply_text(
+                f"✅ Prompt `{name}` added and selected. ({len(full_text)} characters, {len(parts)} part(s) combined.)",
+                reply_markup=kb_prompt_list(prompt_kind, cfg)
+            )
+            return
+
+        # Accumulate this chunk and keep waiting — this also transparently handles the
+        # case where Telegram itself split one long paste into multiple messages.
+        parts.append(text)
+        total_len = sum(len(p) for p in parts)
+        await message.reply_text(
+            f"➕ Part {len(parts)} received ({len(text)} chars, total so far: {total_len}).\n"
+            f"Aur bhejo, ya `/donedone` reply karke save karo."
+        )
         return
 
 # ================= Job State for Pause/Resume =================
@@ -989,19 +1013,34 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             )
             continue
 
-        output_path = package_output(file_translated_dir, job_root, file_idx, cfg['output_format'])
-        all_translated_outputs.append((file_idx, output_path))
-
         try:
-            await client.send_document(
-                source_message.chat.id,
-                document=output_path,
-                caption=(
-                    f"💥 **File {file_idx}/{total_files} done!**\n"
-                    f"📦 Format: `.{cfg['output_format'].upper()}`\n"
-                    f"🖼 Frames: `{total_images}`"
+            if cfg['output_format'] == 'img':
+                # Raw Images mode: send each translated image as its own document,
+                # in order, instead of silently zipping them.
+                image_files = sorted(
+                    [f for f in os.listdir(file_translated_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
                 )
-            )
+                for img_idx, img_name in enumerate(image_files, start=1):
+                    send_kwargs = {
+                        "chat_id": source_message.chat.id,
+                        "document": os.path.join(file_translated_dir, img_name),
+                    }
+                    if img_idx == 1:
+                        send_kwargs["caption"] = f"💥 **File {file_idx}/{total_files} — image {img_idx}/{len(image_files)}**"
+                    await client.send_document(**send_kwargs)
+                all_translated_outputs.append((file_idx, file_translated_dir))
+            else:
+                output_path = package_output(file_translated_dir, job_root, file_idx, cfg['output_format'])
+                all_translated_outputs.append((file_idx, output_path))
+                await client.send_document(
+                    source_message.chat.id,
+                    document=output_path,
+                    caption=(
+                        f"💥 **File {file_idx}/{total_files} done!**\n"
+                        f"📦 Format: `.{cfg['output_format'].upper()}`\n"
+                        f"🖼 Frames: `{total_images}`"
+                    )
+                )
         except Exception as send_err:
             await safe_edit(status_msg, f"❌ **Failed to send file {file_idx}/{total_files}:**\n`{send_err}`")
             active_jobs.pop(user_id, None)
@@ -1050,7 +1089,9 @@ def package_output(source_dir, job_root, file_idx, output_format):
             pass
         shutil.make_archive(archive_base, "zip", source_dir)
         return f"{archive_base}.zip"
-    else:  # raw images -> zip them anyway since Telegram needs a single document, unless caller sends individually
+    else:
+        # "img" (Raw Images) never reaches here - it's handled separately by sending
+        # each translated image individually. This fallback only covers unknown formats.
         shutil.make_archive(archive_base, "zip", source_dir)
         return f"{archive_base}.zip"
 

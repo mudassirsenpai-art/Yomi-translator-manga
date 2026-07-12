@@ -69,6 +69,38 @@ UPLOAD_MODES = [
     ("📄 PDF", "pdf"),
 ]
 
+# ================= Content Type Profiles =================
+# Different source formats need fundamentally different processing:
+#  - Manhwa: long vertical-scroll strips, often delivered as sliced fragments
+#    (001__001.jpg, 001__002.jpg...). After stitching, a single page can be
+#    10,000+ px tall, which crushes YOLO speech-bubble detection since the
+#    detector resizes the image down to its fixed input resolution (e.g.
+#    640-1280px) - bubbles become sub-pixel and vanish. Fix: tile the tall
+#    page into overlapping detection-sized windows, run the translator per
+#    tile, then recompose.
+#  - Manga/Comic: normal single-page images/spreads, no tiling needed -
+#    default single-page pipeline as-is.
+#  - Novel: text-heavy prose, no speech bubbles or panel art at all. Image
+#    pipeline (detection/cleaning/rendering) is actively wrong here - it
+#    would try to detect bubbles that don't exist. This mode should route to
+#    a plain OCR + translate pass without the bubble/render stages.
+CONTENT_TYPES = [
+    ("🍥 Manhwa (long strip)", "manhwa"),
+    ("📖 Manga (page-by-page)", "manga"),
+    ("💬 Comic (Western)", "comic"),
+    ("📝 Novel (text only)", "novel"),
+]
+
+# Tiling parameters for long-strip Manhwa. Each tile is TILE_HEIGHT tall with
+# TILE_OVERLAP px shared between consecutive tiles so a bubble that straddles
+# a cut line still appears whole in at least one tile.
+MANHWA_TILE_HEIGHT = 1600
+MANHWA_TILE_OVERLAP = 200
+# Only kick in tiling once a stitched page exceeds this height - short
+# Manhwa pages behave fine as a single image and tiling would just add
+# unnecessary subprocess calls.
+MANHWA_TILE_TRIGGER_HEIGHT = 2200
+
 DEFAULT_SYSTEM_PROMPT_NAME = "Default Localization Engine"
 DEFAULT_SYSTEM_PROMPT_TEXT = (
     "You are a professional multi-language manga and comic localization engine.\n"
@@ -114,6 +146,17 @@ def default_config():
         "api_key": "",
         "model_name": "gemini-3-flash-preview",
         "output_format": "zip",
+        # Which processing profile to use - see CONTENT_TYPES. Controls
+        # whether long-strip tiling kicks in (manhwa), whether the image
+        # pipeline runs at all (novel = text-only, skipped), etc.
+        "content_type": "manhwa",
+        "content_type_label": "🍥 Manhwa (long strip)",
+        # OSB (Outside Speech Bubble) text detection - catches Manhwa-style
+        # narration/SFX/dialogue placed outside drawn bubble shapes. Defaults
+        # ON since most scraped Manhwa needs it; requires the HF_TOKEN env
+        # var / --osb setup described in the MangaTranslator README to
+        # actually download the AnimeText_yolo model on first use.
+        "osb_enabled": True,
         "system_prompt_name": DEFAULT_SYSTEM_PROMPT_NAME,
         "system_prompt_text": DEFAULT_SYSTEM_PROMPT_TEXT,
         "user_prompt_name": DEFAULT_USER_PROMPT_NAME,
@@ -125,6 +168,16 @@ def get_user_config(user_id):
     if uid not in user_settings:
         user_settings[uid] = default_config()
         _save_all_settings(user_settings)
+    else:
+        # Backfill any new config keys added in later versions (e.g. osb_enabled)
+        # for users whose settings were saved before that key existed, so we
+        # never hit a KeyError on an old config.
+        defaults = default_config()
+        cfg = user_settings[uid]
+        missing = {k: v for k, v in defaults.items() if k not in cfg}
+        if missing:
+            cfg.update(missing)
+            _save_all_settings(user_settings)
     return user_settings[uid]
 
 async def save_user_config(user_id):
@@ -239,12 +292,21 @@ auth_filter_cb = filters.create(auth_check_cb)
 # ================= Keyboard Builders =================
 def kb_main_menu():
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📚 Content Type", callback_data="menu_content_type")],
         [InlineKeyboardButton("🌐 Language Settings", callback_data="menu_lang")],
         [InlineKeyboardButton("🔡 Font Track", callback_data="menu_font")],
         [InlineKeyboardButton("⚙️ Provider & API", callback_data="menu_api")],
         [InlineKeyboardButton("📝 Prompt Library", callback_data="menu_prompt")],
         [InlineKeyboardButton("📦 Output Format", callback_data="menu_output")],
     ])
+
+def kb_content_type_select(cfg):
+    rows = []
+    for label, code in CONTENT_TYPES:
+        mark = "✅ " if cfg.get("content_type") == code else ""
+        rows.append([InlineKeyboardButton(f"{mark}{label}", callback_data=f"ctypeset_{code}")])
+    rows.append([InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")])
+    return InlineKeyboardMarkup(rows)
 
 def kb_lang_root(cfg):
     return InlineKeyboardMarkup([
@@ -327,6 +389,8 @@ def kb_output_menu(cfg):
     for label, code in OUTPUT_FORMATS:
         mark = "✅ " if cfg["output_format"] == code else ""
         rows.append([InlineKeyboardButton(f"{mark}{label}", callback_data=f"outset_{code}")])
+    osb_mark = "✅ " if cfg.get("osb_enabled", True) else "❌ "
+    rows.append([InlineKeyboardButton(f"{osb_mark}OSB (Outside-Bubble Text)", callback_data="osb_toggle")])
     rows.append([InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")])
     return InlineKeyboardMarkup(rows)
 
@@ -432,6 +496,36 @@ async def handle_callbacks(client, query: CallbackQuery):
     # ---------- Main Menu ----------
     if data == "main_menu":
         await safe_edit(query.message, "🛠 **Settings**\nChoose a category to configure:", reply_markup=kb_main_menu())
+        return
+
+    # ---------- Content Type Menu ----------
+    if data == "menu_content_type":
+        await safe_edit(
+            query.message,
+            f"📚 **Content Type**\nCurrent: `{cfg.get('content_type_label', 'Manhwa')}`\n\n"
+            f"🍥 **Manhwa**: long vertical-scroll strips. Tall stitched pages "
+            f"are automatically tiled before detection so bubbles don't get "
+            f"crushed into invisibility.\n"
+            f"📖 **Manga**: normal single manga pages, right-to-left panels.\n"
+            f"💬 **Comic**: Western-style single-page comics.\n"
+            f"📝 **Novel**: text-only prose, no bubbles/panels - skips the "
+            f"image detection/rendering pipeline entirely.",
+            reply_markup=kb_content_type_select(cfg)
+        )
+        return
+
+    if data.startswith("ctypeset_"):
+        code = data.split("_", 1)[1]
+        label = next((l for l, c in CONTENT_TYPES if c == code), code)
+        cfg["content_type"] = code
+        cfg["content_type_label"] = label
+        await save_user_config(user_id)
+        await safe_answer(query, f"Content type set to {label}")
+        await safe_edit(
+            query.message,
+            f"📚 **Content Type**\nCurrent: `{cfg['content_type_label']}`",
+            reply_markup=kb_content_type_select(cfg)
+        )
         return
 
     # ---------- Language Menu ----------
@@ -626,6 +720,14 @@ async def handle_callbacks(client, query: CallbackQuery):
         cfg["output_format"] = code
         await save_user_config(user_id)
         await safe_answer(query, f"Output set to .{code}")
+        await safe_edit(query.message, f"📦 **Output Format**\nCurrent: `{cfg['output_format']}`", reply_markup=kb_output_menu(cfg))
+        return
+
+    if data == "osb_toggle":
+        cfg["osb_enabled"] = not cfg.get("osb_enabled", True)
+        await save_user_config(user_id)
+        state = "ON" if cfg["osb_enabled"] else "OFF"
+        await safe_answer(query, f"OSB text detection turned {state}")
         await safe_edit(query.message, f"📦 **Output Format**\nCurrent: `{cfg['output_format']}`", reply_markup=kb_output_menu(cfg))
         return
 
@@ -903,8 +1005,9 @@ def stitch_sliced_images(input_dir):
         # A "group" of exactly one slice is just a normal page with an
         # incidental "__" in its name - leave it as-is, no stitching needed.
 
-def flatten_and_order(input_dir):
-    """Move nested images to root, stitch sliced strips, sort naturally, rename to 001,002... ordering."""
+def flatten_and_order(input_dir, content_type="manhwa"):
+    """Move nested images to root, stitch sliced strips, sort naturally, rename to 001,002... ordering.
+    Returns (ordered_map, tile_manifest). tile_manifest is None unless tiling was applied."""
     for root, _, files in os.walk(input_dir, topdown=False):
         for f in files:
             if f.lower().endswith(IMAGE_EXTS):
@@ -928,7 +1031,130 @@ def flatten_and_order(input_dir):
         if new_name != fname:
             shutil.move(os.path.join(input_dir, fname), os.path.join(input_dir, new_name))
         ordered_map[idx] = new_name
-    return ordered_map
+
+    tile_manifest = None
+    if content_type == "manhwa":
+        tile_manifest = tile_tall_pages(input_dir, ordered_map)
+
+    return ordered_map, tile_manifest
+
+# ================= Long-Strip Tiling (Manhwa) =================
+# Root cause of "no speech bubbles detected" on stitched Manhwa strips:
+# YOLO detectors resize the whole image down to a fixed input resolution
+# (commonly 640-1280px on the longest side) before running inference. A
+# stitched webtoon page that's 10,000-16,000px tall gets crushed down so
+# hard that speech bubbles shrink to a handful of pixels - well below what
+# the detector can resolve, so it reports zero bubbles even though they're
+# clearly visible to a human. The fix used by real webtoon translation
+# tools: slice the tall page into overlapping windows sized close to the
+# detector's native resolution, run detection/translation per window, then
+# recompose the translated windows back into one tall page. The overlap
+# (MANHWA_TILE_OVERLAP) ensures a bubble that straddles a cut line still
+# appears whole in at least one tile.
+
+def tile_tall_pages(input_dir, ordered_map):
+    """
+    For every page taller than MANHWA_TILE_TRIGGER_HEIGHT, slice it into
+    overlapping tiles saved as `{page}_tile{n}.jpg` and remove the original
+    tall page. Returns a manifest dict:
+        { page_idx: {"tiles": [tile_filename, ...], "heights": [...],
+                     "overlap": px, "width": px} }
+    Pages at/under the trigger height are left completely untouched and are
+    absent from the manifest.
+    """
+    from PIL import Image
+    manifest = {}
+    for idx, fname in list(ordered_map.items()):
+        path = os.path.join(input_dir, fname)
+        if not os.path.exists(path):
+            continue
+        with Image.open(path) as im:
+            width, height = im.size
+            if height <= MANHWA_TILE_TRIGGER_HEIGHT:
+                continue  # short enough for the detector as-is, skip tiling
+
+            im = im.convert("RGB")
+            stride = MANHWA_TILE_HEIGHT - MANHWA_TILE_OVERLAP
+            tile_files = []
+            tile_heights = []
+            y = 0
+            tile_n = 0
+            while y < height:
+                tile_bottom = min(y + MANHWA_TILE_HEIGHT, height)
+                tile = im.crop((0, y, width, tile_bottom))
+                tile_name = f"{os.path.splitext(fname)[0]}_tile{tile_n:03d}.jpg"
+                tile.save(os.path.join(input_dir, tile_name), quality=95)
+                tile_files.append(tile_name)
+                tile_heights.append(tile_bottom - y)
+                tile_n += 1
+                if tile_bottom >= height:
+                    break
+                y += stride
+
+            manifest[idx] = {
+                "tiles": tile_files,
+                "heights": tile_heights,
+                "overlap": MANHWA_TILE_OVERLAP,
+                "width": width,
+                "original_height": height,
+                "original_name": fname,
+            }
+        os.remove(path)  # replaced by its tiles
+    return manifest
+
+def recompose_tiled_page(translated_dir, page_idx, manifest_entry):
+    """
+    Stitches translated tile outputs back into one tall page image, trimming
+    the overlap region from every tile after the first so overlapping text
+    doesn't appear duplicated in the final output. Returns the output path,
+    or None if any translated tile is missing (caller should treat that page
+    as a partial/failed translation rather than silently shipping gaps).
+    """
+    from PIL import Image
+    tiles = manifest_entry["tiles"]
+    heights = manifest_entry["heights"]
+    overlap = manifest_entry["overlap"]
+    width = manifest_entry["width"]
+    total_height = manifest_entry["original_height"]
+
+    translated_tile_paths = []
+    for tile_name in tiles:
+        stem = os.path.splitext(tile_name)[0]
+        found = None
+        for ext in IMAGE_EXTS:
+            candidate = os.path.join(translated_dir, stem + ext)
+            if os.path.exists(candidate):
+                found = candidate
+                break
+        if found is None:
+            return None  # a tile failed to translate - don't silently ship a gap
+        translated_tile_paths.append(found)
+
+    recomposed = Image.new("RGB", (width, total_height), (255, 255, 255))
+    y_cursor = 0
+    for i, tile_path in enumerate(translated_tile_paths):
+        with Image.open(tile_path) as tile_im:
+            tile_im = tile_im.convert("RGB")
+            # Resize defensively in case the translator's render stage changed
+            # tile dimensions slightly (e.g. rounding during upscale/cleanup).
+            if tile_im.size != (width, heights[i]):
+                tile_im = tile_im.resize((width, heights[i]))
+            # Trim the top overlap from every tile after the first, since
+            # that region was already painted by the previous tile's bottom.
+            crop_top = overlap if i > 0 else 0
+            visible = tile_im.crop((0, crop_top, width, heights[i]))
+            recomposed.paste(visible, (0, y_cursor))
+            y_cursor += visible.height
+
+    out_name = manifest_entry["original_name"]
+    out_path = os.path.join(translated_dir, out_name)
+    recomposed.save(out_path, quality=95)
+    for p in translated_tile_paths:
+        try:
+            os.remove(p)
+        except Exception:
+            pass
+    return out_path
 
 def build_dynamic_system_instruction(cfg):
     system_text = cfg["system_prompt_text"].replace("{target_lang}", cfg["target_lang"])
@@ -945,6 +1171,33 @@ def resolve_font_path(cfg):
             return str(p.parent)
     return str(FONTS_DIR)
 
+# ================= MangaTranslator CLI Capability Detection =================
+# The upstream fork's flag names occasionally shift between versions (e.g.
+# --target-language vs --output-language). Rather than hardcoding a guess and
+# risking another "unrecognized arguments" crash, we introspect `main.py --help`
+# once per process and cache which flags actually exist, then only pass flags
+# the installed version supports. This also lets us safely opt in to OSB
+# (Outside Speech Bubble) detection when available, which is what most
+# scraped Manhwa needs - dialogue/narration/SFX sitting outside bubble shapes
+# is invisible to the default bubble-only YOLO detector, which is why some
+# pages come back as "no speech bubbles or outside text detected".
+_cli_help_cache = {"text": None}
+
+def _get_main_help_text():
+    if _cli_help_cache["text"] is None:
+        try:
+            result = subprocess.run(
+                ["python", "MangaTranslator/main.py", "--help"],
+                capture_output=True, text=True, timeout=30
+            )
+            _cli_help_cache["text"] = (result.stdout or "") + (result.stderr or "")
+        except Exception:
+            _cli_help_cache["text"] = ""
+    return _cli_help_cache["text"]
+
+def cli_supports_flag(flag):
+    return flag in _get_main_help_text()
+
 # ================= Main Pipeline Runner =================
 async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
     cfg = get_user_config(user_id)
@@ -952,6 +1205,27 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
 
     if not queue or not queue["files"]:
         await safe_edit(status_msg, "❌ Error: No files found in queue. Send `/translate` again.")
+        active_jobs.pop(user_id, None)
+        return
+
+    # Novel content type is text-only prose with no bubbles/panels - running
+    # it through the bubble-detection/inpainting/render pipeline would just
+    # burn API calls trying to detect speech bubbles that don't exist, and
+    # likely produce garbage output. Until a dedicated text-only OCR+translate
+    # path is built, we stop here with a clear explanation rather than
+    # silently shipping a broken or wasteful result.
+    if cfg.get("content_type") == "novel":
+        await safe_edit(
+            status_msg,
+            "📝 **Novel content type isn't supported by this pipeline yet.**\n\n"
+            "This bot's engine (MangaTranslator) is built around detecting and "
+            "redrawing speech bubbles in comic/manga art - it has no bubbles to "
+            "find in prose text, so running it here would waste API calls and "
+            "likely produce broken output.\n\n"
+            "Switch **📚 Content Type** to Manhwa/Manga/Comic for image-based "
+            "chapters. Novel/text support would need a separate OCR+translate "
+            "path - let the maintainer know if you want that built."
+        )
         active_jobs.pop(user_id, None)
         return
 
@@ -1019,12 +1293,24 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
         else:
             shutil.move(downloaded_path, os.path.join(input_dir, os.path.basename(downloaded_path)))
 
-        ordered_map = flatten_and_order(input_dir)
+        ordered_map, tile_manifest = flatten_and_order(input_dir, content_type=cfg.get("content_type", "manhwa"))
         total_images = len(ordered_map)
 
         if total_images == 0:
             await safe_edit(status_msg, f"⚠️ File {file_idx}/{total_files}: no valid images found, skipping.")
             continue
+
+        if tile_manifest:
+            tiled_pages = len(tile_manifest)
+            total_tiles = sum(len(v["tiles"]) for v in tile_manifest.values())
+            await safe_edit(
+                status_msg,
+                build_status_text(mode_label, f"✂️ Tiling {tiled_pages} tall page(s) into {total_tiles} tile(s) for detection", file_idx, total_files, 0, total_images, 20)
+            )
+            # total_images now reflects tiles-on-disk in input_dir (original tall
+            # pages were removed and replaced by their tiles), so re-count for
+            # accurate progress reporting during the translation stage below.
+            total_images = len([f for f in os.listdir(input_dir) if f.lower().endswith(IMAGE_EXTS)])
 
         dynamic_system_instruction = build_dynamic_system_instruction(cfg)
 
@@ -1067,6 +1353,19 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             "--model-name", cfg['model_name'],
             "--special-instructions", dynamic_system_instruction
         ]
+
+        # OSB = "Outside Speech Bubble" text pipeline. Manhwa frequently has
+        # narration boxes, SFX, and freeform text placed OUTSIDE the drawn
+        # bubble shape - the default YOLO bubble detector only looks INSIDE
+        # bubbles, so those pages come back as "no speech bubbles or outside
+        # text detected" even though they clearly have translatable text.
+        # Only added if the user has it enabled AND this installed fork
+        # actually supports the flag, to avoid another
+        # "unrecognized arguments" crash on forks that don't have it.
+        if cfg.get("osb_enabled", True) and cli_supports_flag("--osb-enable"):
+            cmd.append("--osb-enable")
+            if cli_supports_flag("--osb-font-dir"):
+                cmd += ["--osb-font-dir", font_dir_for_run]
 
         await safe_edit(status_msg, 
             build_status_text(mode_label, "🧠 OCR + Translation running", file_idx, total_files, 0, total_images, 40),
@@ -1137,6 +1436,28 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
                 f"Skipping to next file."
             )
             continue
+
+        # If this file had any tall pages that got tiled before translation,
+        # stitch their translated tiles back into single tall pages now,
+        # trimming the overlap so text doesn't appear duplicated at the seams.
+        if tile_manifest:
+            await safe_edit(status_msg, build_status_text(mode_label, "🧵 Recomposing tiled pages", file_idx, total_files, total_images, total_images, 85))
+            recompose_failures = []
+            for page_idx, manifest_entry in tile_manifest.items():
+                result_path = recompose_tiled_page(file_translated_dir, page_idx, manifest_entry)
+                if result_path is None:
+                    recompose_failures.append(page_idx)
+            if recompose_failures:
+                await safe_edit(
+                    status_msg,
+                    f"⚠️ File {file_idx}/{total_files}: {len(recompose_failures)} tiled page(s) "
+                    f"had a tile that failed to translate, so those pages may be incomplete. "
+                    f"Continuing with the rest."
+                )
+            # Re-scan produced_files now that tiles have been merged back down
+            # into full pages, so packaging sees the final page count, not
+            # the intermediate per-tile count.
+            produced_files = [f for f in os.listdir(file_translated_dir) if f.lower().endswith(IMAGE_EXTS)]
 
         try:
             if cfg['output_format'] == 'img':

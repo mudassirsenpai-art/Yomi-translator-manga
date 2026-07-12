@@ -396,6 +396,24 @@ async def cancel_cmd(client, message: Message):
         awaiting_reply.pop(user_id, None)
         await message.reply_text("✅ Session cleared.")
 
+# ================= Safe Background Task Runner =================
+# asyncio.create_task() silently swallows exceptions if the task's result is
+# never awaited/checked. That was the cause of jobs freezing at "Downloading
+# payload" with no error shown - any exception in the pipeline just vanished.
+def run_job(coro, status_msg, user_id):
+    async def _runner():
+        try:
+            await coro
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            try:
+                await safe_edit(status_msg, f"❌ **Job crashed unexpectedly:**\n`{type(e).__name__}: {e}`\n\nSend `/cancel` and try `/translate` again.")
+            except Exception:
+                pass
+            active_jobs.pop(user_id, None)
+    return asyncio.create_task(_runner())
+
 # ================= Callback Query Router =================
 @app.on_callback_query(auth_filter_cb)
 async def handle_callbacks(client, query: CallbackQuery):
@@ -609,7 +627,7 @@ async def handle_callbacks(client, query: CallbackQuery):
     if data == "start_pipeline":
         await safe_edit(query.message, "🔄 Initializing translation pipeline...")
         active_jobs[user_id] = {"cancel": False, "status_msg": query.message}
-        asyncio.create_task(execute_manga_pipeline(client, query.message, user_id))
+        run_job(execute_manga_pipeline(client, query.message, user_id), query.message, user_id)
         return
 
     if data == "job_cancel":
@@ -626,7 +644,7 @@ async def handle_callbacks(client, query: CallbackQuery):
             return
         await safe_edit(query.message, "▶️ Resuming translation...")
         active_jobs[user_id] = {"cancel": False, "status_msg": query.message}
-        asyncio.create_task(resume_manga_pipeline(client, query.message, user_id))
+        run_job(resume_manga_pipeline(client, query.message, user_id), query.message, user_id)
         return
 
     if data == "job_send_partial":
@@ -926,20 +944,44 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
 
         await safe_edit(status_msg, build_status_text(mode_label, "📦 Packaging output", file_idx, total_files, total_images, total_images, 90))
 
+        # Verify the OCR/translation engine actually produced output before packaging.
+        # Without this check, an empty output folder silently becomes an empty zip
+        # that "successfully" sends, making it look like nothing happened.
+        produced_files = []
+        if os.path.exists(file_translated_dir):
+            produced_files = [f for f in os.listdir(file_translated_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
+
+        if not produced_files:
+            await safe_edit(
+                status_msg,
+                f"❌ **File {file_idx}/{total_files} produced no output.**\n"
+                f"MangaTranslator engine ne koi translated image nahi banayi — check stderr/logs on the runner.\n"
+                f"Skipping to next file."
+            )
+            continue
+
         output_path = package_output(file_translated_dir, job_root, file_idx, cfg['output_format'])
         all_translated_outputs.append((file_idx, output_path))
 
-        await client.send_document(
-            source_message.chat.id,
-            document=output_path,
-            caption=(
-                f"💥 **File {file_idx}/{total_files} done!**\n"
-                f"📦 Format: `.{cfg['output_format'].upper()}`\n"
-                f"🖼 Frames: `{total_images}`"
+        try:
+            await client.send_document(
+                source_message.chat.id,
+                document=output_path,
+                caption=(
+                    f"💥 **File {file_idx}/{total_files} done!**\n"
+                    f"📦 Format: `.{cfg['output_format'].upper()}`\n"
+                    f"🖼 Frames: `{total_images}`"
+                )
             )
-        )
+        except Exception as send_err:
+            await safe_edit(status_msg, f"❌ **Failed to send file {file_idx}/{total_files}:**\n`{send_err}`")
+            active_jobs.pop(user_id, None)
+            return
 
-    await safe_edit(status_msg, f"✅ **All {total_files} file(s) translated and sent!**")
+    if not all_translated_outputs:
+        await safe_edit(status_msg, "⚠️ **Job finished but no files were produced/sent.** Check the engine logs.")
+    else:
+        await safe_edit(status_msg, f"✅ **{len(all_translated_outputs)}/{total_files} file(s) translated and sent!**")
     active_jobs.pop(user_id, None)
     pending_files.pop(user_id, None)
     paused_jobs.pop(user_id, None)

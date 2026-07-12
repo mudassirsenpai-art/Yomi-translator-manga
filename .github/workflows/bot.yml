@@ -1,7 +1,13 @@
 name: MangaTranslator Bot Service
 
 on:
-  workflow_dispatch: # Manual trigger from GitHub Actions tab
+  workflow_dispatch: # Manual start button
+  schedule:
+    - cron: "0 */5 * * *" # Har 5 ghante mein auto-restart karega (Bypasses 6-hour limit)
+
+concurrency:
+  group: manga-bot-service
+  cancel-in-progress: true # Naya instance start hote hi purana safely kill ho jayega
 
 jobs:
   run-bot:
@@ -15,7 +21,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Setup System Dependencies (FFmpeg, etc.)
+      - name: Setup System Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libgl1 unzip zip ffmpeg
@@ -30,6 +36,7 @@ jobs:
 
       - name: Run Telegram Bot
         env:
+          # GitHub Secrets se exact yehi names aane chahiye
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           AUTHORIZED_USERS: ${{ secrets.AUTHORIZED_USERS }}
         run: python bot.py

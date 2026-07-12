@@ -59,19 +59,21 @@ jobs:
         run: |
           python -c "import fitz; import PIL; import numpy; import pyrogram; import tgcrypto; print('core imports OK')"
 
-      # ---- DIAGNOSTIC STEP (temporary), round 2 ----
-      # Round 1 confirmed: no core/detection.py in this version (logic moved
-      # into pipeline.py + scaling.py), and no direct --imgsz/detection-size
-      # flag exists. This round pulls the actual resize/scaling code so we
-      # can see exactly how/where YOLO's input resolution is determined,
-      # and whether it can be safely raised for tall Manhwa pages.
-      - name: Diagnose YOLO detection resolution options (round 2)
+      # ---- DIAGNOSTIC STEP (temporary), round 3 ----
+      # Round 2 confirmed the real detector lives at core/image/detection.py
+      # (imported as `from .image.detection import detect_panels,
+      # detect_speech_bubbles` in pipeline.py). scaling.py was just generic
+      # math helpers, not the detector itself. This round pulls the real file.
+      - name: Diagnose YOLO detection resolution options (round 3)
         run: |
-          echo "===== core/scaling.py (full file) ====="
-          cat MangaTranslator/core/scaling.py || true
+          echo "===== core/image/detection.py (full file) ====="
+          cat MangaTranslator/core/image/detection.py || true
           echo ""
-          echo "===== core/pipeline.py: lines mentioning resize/imgsz/detect/scale ====="
-          grep -n -i "imgsz\|resize\|detect_speech\|scale\|max_side\|min_side\|yolo(" MangaTranslator/core/pipeline.py || true
+          echo "===== core/image/ directory listing ====="
+          ls -la MangaTranslator/core/image/ || true
+          echo ""
+          echo "===== core/config.py: lines mentioning bubble/context/max_side/min_side ====="
+          grep -n -i "bubble_min_side\|context_image_max_side\|max_side\|min_side\|imgsz" MangaTranslator/core/config.py || true
 
       - name: Run Telegram Bot
         env:

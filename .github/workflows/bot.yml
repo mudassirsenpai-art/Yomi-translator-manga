@@ -59,24 +59,19 @@ jobs:
         run: |
           python -c "import fitz; import PIL; import numpy; import pyrogram; import tgcrypto; print('core imports OK')"
 
-      # ---- DIAGNOSTIC STEP (temporary) ----
-      # This prints main.py's real --help output and the actual detection
-      # source code, so we can confirm - with certainty, not a guess -
-      # whether this installed version exposes any YOLO input-resolution
-      # control (imgsz / detection-size / similar). Once we have that
-      # answer, this step gets removed and replaced with the real fix.
-      - name: Diagnose YOLO detection resolution options
+      # ---- DIAGNOSTIC STEP (temporary), round 2 ----
+      # Round 1 confirmed: no core/detection.py in this version (logic moved
+      # into pipeline.py + scaling.py), and no direct --imgsz/detection-size
+      # flag exists. This round pulls the actual resize/scaling code so we
+      # can see exactly how/where YOLO's input resolution is determined,
+      # and whether it can be safely raised for tall Manhwa pages.
+      - name: Diagnose YOLO detection resolution options (round 2)
         run: |
-          echo "===== main.py --help ====="
-          python MangaTranslator/main.py --help || true
+          echo "===== core/scaling.py (full file) ====="
+          cat MangaTranslator/core/scaling.py || true
           echo ""
-          echo "===== core/detection.py ====="
-          if [ -f MangaTranslator/core/detection.py ]; then
-            cat MangaTranslator/core/detection.py
-          else
-            echo "core/detection.py not found - listing core/ instead:"
-            ls -la MangaTranslator/core/ || true
-          fi
+          echo "===== core/pipeline.py: lines mentioning resize/imgsz/detect/scale ====="
+          grep -n -i "imgsz\|resize\|detect_speech\|scale\|max_side\|min_side\|yolo(" MangaTranslator/core/pipeline.py || true
 
       - name: Run Telegram Bot
         env:

@@ -59,7 +59,8 @@ jobs:
           # ModuleNotFoundError, which silently kills every translation job.
           pip install torch==2.11.0 torchvision==0.26.0 --extra-index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
-          pip install Pillow openai pyrogram tgcrypto
+          # Added PyMuPDF here for smooth PDF extraction
+          pip install Pillow openai pyrogram tgcrypto PyMuPDF
 
       - name: Run Telegram Bot
         env:

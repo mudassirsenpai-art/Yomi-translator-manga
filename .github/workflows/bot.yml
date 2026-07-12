@@ -1,13 +1,13 @@
 name: MangaTranslator Bot Service
 
 on:
-  workflow_dispatch: # Manual start button
+  workflow_dispatch: 
   schedule:
-    - cron: "0 */5 * * *" # Har 5 ghante mein auto-restart karega (Bypasses 6-hour limit)
+    - cron: "0 */5 * * *" 
 
 concurrency:
   group: manga-bot-service
-  cancel-in-progress: true # Naya instance start hote hi purana safely kill ho jayega
+  cancel-in-progress: true 
 
 jobs:
   run-bot:
@@ -36,7 +36,8 @@ jobs:
 
       - name: Run Telegram Bot
         env:
-          # GitHub Secrets se exact yehi names aane chahiye
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           AUTHORIZED_USERS: ${{ secrets.AUTHORIZED_USERS }}
         run: python bot.py

@@ -937,6 +937,25 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
                         build_status_text(mode_label, "🧠 OCR + Translation running", file_idx, total_files, done_count, total_images, min(pct, 80)),
                         reply_markup=kb_cancel_only()
                     )
+
+            stdout_bytes, stderr_bytes = await process.communicate()
+            stdout_text = (stdout_bytes or b"").decode(errors="replace")
+            stderr_text = (stderr_bytes or b"").decode(errors="replace")
+
+            # Always dump the engine's own logs to the runner console for full debugging.
+            print("----- MangaTranslator stdout -----")
+            print(stdout_text)
+            print("----- MangaTranslator stderr -----")
+            print(stderr_text)
+
+            if process.returncode != 0:
+                tail = (stderr_text.strip() or stdout_text.strip() or "no output captured")[-800:]
+                await safe_edit(
+                    status_msg,
+                    f"❌ **Engine exited with error on file {file_idx}/{total_files}** (code {process.returncode}):\n```\n{tail}\n```"
+                )
+                active_jobs.pop(user_id, None)
+                return
         except Exception as exec_err:
             await safe_edit(status_msg, f"❌ Engine error on file {file_idx}/{total_files}: {exec_err}")
             active_jobs.pop(user_id, None)
@@ -952,10 +971,11 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             produced_files = [f for f in os.listdir(file_translated_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
 
         if not produced_files:
+            debug_tail = (stderr_text.strip() or stdout_text.strip() or "no output captured")[-800:]
             await safe_edit(
                 status_msg,
                 f"❌ **File {file_idx}/{total_files} produced no output.**\n"
-                f"MangaTranslator engine ne koi translated image nahi banayi — check stderr/logs on the runner.\n"
+                f"Engine exited cleanly (code 0) but wrote no translated images.\n```\n{debug_tail}\n```\n"
                 f"Skipping to next file."
             )
             continue

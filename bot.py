@@ -96,11 +96,24 @@ CONTENT_TYPES = [
 # row within +/- MANHWA_TILE_SEARCH_RADIUS px, so a cut never lands in the
 # middle of a speech bubble or dense artwork. See tile_tall_pages().
 MANHWA_TILE_HEIGHT = 1600
-MANHWA_TILE_OVERLAP = 350  # reused as the safe-cut search radius (+/- px)
+# Widened from 350 - gives the safe-cut search more room to find a row that
+# is genuinely blank rather than settling for the least-bad row nearby.
+MANHWA_TILE_OVERLAP = 450  # reused as the safe-cut search radius (+/- px)
 # Only kick in tiling once a stitched page exceeds this height - short
 # Manhwa pages behave fine as a single image and tiling would just add
 # unnecessary subprocess calls.
 MANHWA_TILE_TRIGGER_HEIGHT = 2200
+# A row must be this flat (low std-dev) to count as a safe cut line. Lower
+# than the previous implicit 6.0 default - stricter means a cut is only ever
+# accepted on rows that are truly blank background, not just low-contrast
+# art, which is what let cuts land close enough to bubble edges to produce
+# duplicated text after recomposition.
+MANHWA_SAFE_CUT_FLAT_THRESHOLD = 3.5
+# If no row in the search window clears the flatness threshold, the page is
+# considered to have no safe cut near the target line. Rather than falling
+# back to "least bad" (which is what produced duplicates before), the page
+# is tiled at a taller height instead - see _find_safe_cut_row.
+MANHWA_MAX_TILE_HEIGHT = 2600  # hard ceiling before we give up extending
 
 DEFAULT_SYSTEM_PROMPT_NAME = "Default Localization Engine"
 DEFAULT_SYSTEM_PROMPT_TEXT = (
@@ -1065,21 +1078,21 @@ def _compute_row_flatness(im):
     arr = np.asarray(gray, dtype=np.float32)
     return arr.std(axis=1)
 
-def _find_safe_cut_row(row_flatness, target_y, search_window, min_y, max_y, flat_threshold=6.0):
+def _find_safe_cut_row(row_flatness, target_y, search_window, min_y, max_y,
+                        flat_threshold=MANHWA_SAFE_CUT_FLAT_THRESHOLD):
     """
     Finds a cut row near target_y that avoids slicing through a bubble.
     Strategy:
       1. If target_y itself is already flat enough, use it.
       2. Otherwise scan outward within +/- search_window for the nearest row
-         that clears the flatness threshold.
-      3. If NOTHING in the window clears the threshold (e.g. target_y sits
-         inside a long stretch of dense, evenly-toned artwork with no true
-         gutter nearby), fall back to whichever row in the window is
-         LOCALLY FLATTEST rather than blindly using target_y. This still
-         nearly always lands outside actual bubble text (bubble interiors
-         are near-solid white/flat, but bubble OUTLINES and letters are the
-         highest-contrast rows on the page) even when it can't find a
-         perfect full-width gutter.
+         that clears the (strict) flatness threshold.
+      3. If NOTHING in the window clears the threshold, return None instead
+         of forcing a cut on the "least bad" row. A row that fails the
+         threshold is not confirmed blank - it may just be a lighter part of
+         a bubble or a soft gradient background, and cutting there is
+         exactly what let duplicated text slip through before. The caller
+         (tile_tall_pages) is responsible for extending the tile taller and
+         searching again rather than accepting a risky cut.
     """
     if row_flatness[target_y] < flat_threshold:
         return target_y
@@ -1090,13 +1103,7 @@ def _find_safe_cut_row(row_flatness, target_y, search_window, min_y, max_y, flat
             return down
         if up >= min_y and row_flatness[up] < flat_threshold:
             return up
-    # No row cleanly passed the threshold - use the flattest row available
-    # in the window instead of giving up and using target_y unconditionally.
-    lo = max(min_y, target_y - search_window)
-    hi = min(max_y, target_y + search_window)
-    window = row_flatness[lo:hi + 1]
-    best_offset = int(window.argmin())
-    return lo + best_offset
+    return None  # no confirmed-safe row nearby - caller must extend, not force
 
 def tile_tall_pages(input_dir, ordered_map):
     """
@@ -1137,15 +1144,35 @@ def tile_tall_pages(input_dir, ordered_map):
 
             tile_files = []
             tile_heights = []
+            forced_cut_rows = []  # rows where we hit MANHWA_MAX_TILE_HEIGHT without a confirmed-safe row
             y = 0
             tile_n = 0
             while y < height:
                 target_bottom = min(y + MANHWA_TILE_HEIGHT, height)
-                if target_bottom < height:
-                    # Snap to the nearest blank row so we never cut mid-bubble.
-                    cut = _find_safe_cut_row(row_flatness, target_bottom, search_window, y + 1, height - 1)
-                else:
+                if target_bottom >= height:
                     cut = height
+                else:
+                    cut = _find_safe_cut_row(row_flatness, target_bottom, search_window, y + 1, height - 1)
+                    # No confirmed-safe row near the target - extend the tile
+                    # taller in fixed steps and try again, rather than forcing
+                    # a cut on a row that failed the flatness check. This is
+                    # the change that removes the "least bad row" fallback
+                    # that previously let duplicate-prone cuts through.
+                    extended_target = target_bottom
+                    while cut is None and extended_target < height:
+                        extended_target = min(extended_target + MANHWA_TILE_OVERLAP, height)
+                        if extended_target >= height:
+                            cut = height
+                            break
+                        if extended_target - y >= MANHWA_MAX_TILE_HEIGHT:
+                            # Hit the hard ceiling with no safe row found anywhere
+                            # in range. Record this so the page can be flagged
+                            # rather than silently shipped if it later shows
+                            # signs of a duplicate at this seam.
+                            cut = extended_target
+                            forced_cut_rows.append(cut)
+                            break
+                        cut = _find_safe_cut_row(row_flatness, extended_target, search_window, y + 1, height - 1)
 
                 tile = im.crop((0, y, width, cut))
                 tile_name = f"{os.path.splitext(fname)[0]}_tile{tile_n:03d}.jpg"
@@ -1163,9 +1190,45 @@ def tile_tall_pages(input_dir, ordered_map):
                 "width": width,
                 "original_height": height,
                 "original_name": fname,
+                "forced_cut_rows": forced_cut_rows,  # cuts made without a confirmed-safe row
             }
         os.remove(path)  # replaced by its tiles
     return manifest
+
+# How many rows above/below a seam to compare when checking for duplicated
+# content. A duplicated bubble typically repeats a solid block of rows, not
+# just a couple of pixels, so this window is wide enough to catch that while
+# staying cheap to compute.
+SEAM_CHECK_BAND_PX = 40
+# If the mean absolute pixel difference between the band just above a seam
+# and the band just below it is under this value, the two bands are treated
+# as visually near-identical - a strong signal of duplicated content rather
+# than two genuinely different rows of art.
+SEAM_DUPLICATE_DIFF_THRESHOLD = 6.0
+
+def _seam_looks_duplicated(recomposed_im, seam_y, band_px=SEAM_CHECK_BAND_PX):
+    """
+    Compares the band of rows just above vs. just below a seam for
+    near-identical content, which would indicate the same bubble/text got
+    rendered on both sides of a tile boundary. Returns True if a duplicate is
+    suspected. Only meaningful at seams that came from a forced cut (no
+    confirmed-safe row was found originally) - safe cuts should never trigger
+    this, since they were already confirmed to sit on blank rows.
+    """
+    import numpy as np
+    width, height = recomposed_im.size
+    top = max(0, seam_y - band_px)
+    bottom = min(height, seam_y + band_px)
+    if bottom - top < band_px * 2:
+        return False  # too close to page edge to compare meaningfully
+    region = recomposed_im.crop((0, top, width, bottom)).convert("L")
+    arr = np.asarray(region, dtype=np.float32)
+    upper_band = arr[:band_px]
+    lower_band = arr[band_px:]
+    if upper_band.shape != lower_band.shape:
+        return False
+    diff = np.abs(upper_band - lower_band).mean()
+    return diff < SEAM_DUPLICATE_DIFF_THRESHOLD
 
 def recompose_tiled_page(translated_dir, page_idx, manifest_entry):
     """
@@ -1174,15 +1237,26 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry):
     safe/blank rows in the original image, so no bubble or panel spans two
     tiles, and each tile's full height can be pasted back exactly where it
     came from without any risk of duplicated text at the seams.
-    Returns the output path, or None if any translated tile is missing
-    (caller should treat that page as a partial/failed translation rather
-    than silently shipping gaps).
+
+    As a final safety net, seams that came from a "forced" cut (tile_manifest
+    recorded no confirmed-safe row nearby, see tile_tall_pages) are checked
+    for duplicated content after recomposition. If a duplicate is detected,
+    this returns ("duplicate_suspected", flagged_seam_rows) instead of
+    silently shipping a page that likely has repeated text - the caller
+    should surface this to the user rather than send it.
+
+    Returns:
+      - (output_path, []) on a clean recompose
+      - (output_path, [flagged_y, ...]) if forced-cut seams look suspicious
+        (page is still saved/returned so the caller can decide what to do)
+      - None if any translated tile is missing entirely
     """
     from PIL import Image
     tiles = manifest_entry["tiles"]
     heights = manifest_entry["heights"]
     width = manifest_entry["width"]
     total_height = manifest_entry["original_height"]
+    forced_cut_rows = set(manifest_entry.get("forced_cut_rows", []))
 
     translated_tile_paths = []
     for tile_name in tiles:
@@ -1198,6 +1272,7 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry):
         translated_tile_paths.append(found)
 
     recomposed = Image.new("RGB", (width, total_height), (255, 255, 255))
+    seam_ys = []  # y-position of each join, in the recomposed page's coordinates
     y_cursor = 0
     for i, tile_path in enumerate(translated_tile_paths):
         with Image.open(tile_path) as tile_im:
@@ -1208,6 +1283,16 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry):
                 tile_im = tile_im.resize((width, heights[i]))
             recomposed.paste(tile_im, (0, y_cursor))
             y_cursor += tile_im.height
+            if i < len(translated_tile_paths) - 1:
+                seam_ys.append(y_cursor)
+
+    # Only check seams that correspond to a forced cut - safe cuts were
+    # already confirmed blank in the original image and don't need re-checking.
+    flagged_seams = []
+    for seam_y in seam_ys:
+        if any(abs(seam_y - forced_y) <= 2 for forced_y in forced_cut_rows):
+            if _seam_looks_duplicated(recomposed, seam_y):
+                flagged_seams.append(seam_y)
 
     out_name = manifest_entry["original_name"]
     out_path = os.path.join(translated_dir, out_name)
@@ -1217,7 +1302,7 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry):
             os.remove(p)
         except Exception:
             pass
-    return out_path
+    return (out_path, flagged_seams)
 
 def build_dynamic_system_instruction(cfg):
     system_text = cfg["system_prompt_text"].replace("{target_lang}", cfg["target_lang"])
@@ -1501,21 +1586,39 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             continue
 
         # If this file had any tall pages that got tiled before translation,
-        # stitch their translated tiles back into single tall pages now,
-        # trimming the overlap so text doesn't appear duplicated at the seams.
+        # stitch their translated tiles back into single tall pages now. No
+        # overlap trimming is needed - tiles were cut on confirmed-safe rows -
+        # but pages that had a forced cut (no safe row was found) get a final
+        # duplicate check at that seam before shipping.
         if tile_manifest:
             await safe_edit(status_msg, build_status_text(mode_label, "🧵 Recomposing tiled pages", file_idx, total_files, total_images, total_images, 85))
             recompose_failures = []
+            duplicate_suspected_pages = []
             for page_idx, manifest_entry in tile_manifest.items():
-                result_path = recompose_tiled_page(file_translated_dir, page_idx, manifest_entry)
-                if result_path is None:
+                result = recompose_tiled_page(file_translated_dir, page_idx, manifest_entry)
+                if result is None:
                     recompose_failures.append(page_idx)
+                    continue
+                result_path, flagged_seams = result
+                if flagged_seams:
+                    duplicate_suspected_pages.append(page_idx)
             if recompose_failures:
                 await safe_edit(
                     status_msg,
                     f"⚠️ File {file_idx}/{total_files}: {len(recompose_failures)} tiled page(s) "
                     f"had a tile that failed to translate, so those pages may be incomplete. "
                     f"Continuing with the rest."
+                )
+            if duplicate_suspected_pages:
+                # Don't silently ship these - tell the user exactly which
+                # pages to double-check. The page is still included in the
+                # output (better than a gap), just flagged.
+                pages_list = ", ".join(str(p) for p in duplicate_suspected_pages)
+                await safe_edit(
+                    status_msg,
+                    f"⚠️ File {file_idx}/{total_files}: possible duplicated text detected on "
+                    f"page(s) {pages_list} (unusually tall panel with no clean cut point found). "
+                    f"Please double-check these pages in the output."
                 )
             # Re-scan produced_files now that tiles have been merged back down
             # into full pages, so packaging sees the final page count, not

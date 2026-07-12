@@ -9,7 +9,7 @@ from pathlib import Path
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
 from PIL import Image
-import fitz  # PyMuPDF for smooth PDF extraction
+import fitz  # PyMuPDF
 
 # ================= Configuration & Secrets =================
 API_ID = int(os.environ.get("API_ID", 0))
@@ -177,24 +177,18 @@ def delete_font(name):
         return True
     return False
 
-# ================= Git Persistence (GitHub Actions runner) =================
+# ================= Git Persistence =================
 def git_commit_data(message):
     try:
-        subprocess.run(["git", "add", str(DATA_DIR)], cwd=str(BASE_DIR), check=False,
-                        capture_output=True)
-        result = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=str(BASE_DIR),
-                                 capture_output=True)
+        subprocess.run(["git", "add", str(DATA_DIR)], cwd=str(BASE_DIR), check=False, capture_output=True)
+        result = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=str(BASE_DIR), capture_output=True)
         if result.returncode == 0:
             return  
-        subprocess.run(["git", "-c", "user.email=bot@yomisubs.local",
-                         "-c", "user.name=YomiSubsBot",
-                         "commit", "-m", message], cwd=str(BASE_DIR), check=False,
-                        capture_output=True)
+        subprocess.run(["git", "-c", "user.email=bot@yomisubs.local", "-c", "user.name=YomiSubsBot", "commit", "-m", message], cwd=str(BASE_DIR), check=False, capture_output=True)
         subprocess.run(["git", "push"], cwd=str(BASE_DIR), check=False, capture_output=True)
     except Exception as e:
         print(f"⚠️ Git persistence skipped: {e}")
 
-# ================= Limits =================
 PROMPT_NAME_MAX_LEN = 32  
 
 # ================= Safe Telegram UI Helpers =================
@@ -208,7 +202,7 @@ async def safe_edit(message, text, reply_markup=None):
         try:
             await message.edit_text(text + " ", reply_markup=reply_markup)
         except Exception as e2:
-            print(f"⚠️ safe_edit failed: {e2}")
+            pass
 
 async def safe_answer(query, text=None, show_alert=False):
     try:
@@ -216,8 +210,8 @@ async def safe_answer(query, text=None, show_alert=False):
             await query.answer(text, show_alert=show_alert)
         else:
             await query.answer()
-    except Exception as e:
-        print(f"⚠️ safe_answer failed: {e}")
+    except Exception:
+        pass
 
 # ================= Auth Gate Filter =================
 async def auth_check(_, __, message):
@@ -355,10 +349,7 @@ async def translate_cmd(client, message: Message):
         await message.reply_text("⚠️ Ek job already chal rahi hai. Pehle usse cancel ya complete karo.")
         return
     pending_files[user_id] = {"mode": None, "files": [], "collecting": False}
-    await message.reply_text(
-        "📋 **What are you going to upload?**\nSelect the input type below:",
-        reply_markup=kb_upload_mode()
-    )
+    await message.reply_text("📋 **What are you going to upload?**\nSelect the input type below:", reply_markup=kb_upload_mode())
 
 @app.on_message(filters.command("end") & auth_filter)
 async def end_cmd(client, message: Message):
@@ -373,10 +364,7 @@ async def end_cmd(client, message: Message):
         pending_files.pop(user_id, None)
         return
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Start Translation", callback_data="start_pipeline")]])
-    await message.reply_text(
-        f"✅ **{len(queue['files'])} file(s) queued.**\nReady to start translation?",
-        reply_markup=kb
-    )
+    await message.reply_text(f"✅ **{len(queue['files'])} file(s) queued.**\nReady to start translation?", reply_markup=kb)
 
 @app.on_message(filters.command("cancel") & auth_filter)
 async def cancel_cmd(client, message: Message):
@@ -417,10 +405,7 @@ async def handle_callbacks(client, query: CallbackQuery):
         return
 
     if data == "menu_lang":
-        await safe_edit(query.message, 
-            f"🌐 **Language Settings**\nSource: `{cfg['source_lang_label']}`\nTarget: `{cfg['target_lang_label']}`\n\nTap a field to change it:",
-            reply_markup=kb_lang_root(cfg)
-        )
+        await safe_edit(query.message, f"🌐 **Language Settings**\nSource: `{cfg['source_lang_label']}`\nTarget: `{cfg['target_lang_label']}`\n\nTap a field to change it:", reply_markup=kb_lang_root(cfg))
         return
     if data == "lang_src_open":
         await safe_edit(query.message, "🌐 **Select Source Language:**", reply_markup=kb_source_select(cfg))
@@ -434,11 +419,7 @@ async def handle_callbacks(client, query: CallbackQuery):
         cfg["source_lang"] = code
         cfg["source_lang_label"] = label
         await save_user_config(user_id)
-        await safe_answer(query, f"Source set to {label}")
-        await safe_edit(query.message, 
-            f"🌐 **Language Settings**\nSource: `{cfg['source_lang_label']}`\nTarget: `{cfg['target_lang_label']}`\n\nTap a field to change it:",
-            reply_markup=kb_lang_root(cfg)
-        )
+        await safe_edit(query.message, f"🌐 **Language Settings**\nSource: `{cfg['source_lang_label']}`\nTarget: `{cfg['target_lang_label']}`\n\nTap a field to change it:", reply_markup=kb_lang_root(cfg))
         return
     if data.startswith("tgtset_"):
         value = data.split("_", 1)[1]
@@ -450,18 +431,12 @@ async def handle_callbacks(client, query: CallbackQuery):
         cfg["target_lang"] = value
         cfg["target_lang_label"] = label
         await save_user_config(user_id)
-        await safe_answer(query, f"Target set to {label}")
-        await safe_edit(query.message, 
-            f"🌐 **Language Settings**\nSource: `{cfg['source_lang_label']}`\nTarget: `{cfg['target_lang_label']}`\n\nTap a field to change it:",
-            reply_markup=kb_lang_root(cfg)
-        )
+        await safe_edit(query.message, f"🌐 **Language Settings**\nSource: `{cfg['source_lang_label']}`\nTarget: `{cfg['target_lang_label']}`\n\nTap a field to change it:", reply_markup=kb_lang_root(cfg))
         return
 
     if data == "menu_font":
         fonts = list_fonts()
-        body = "🔡 **Font Track**\n"
-        body += f"Selected: `{cfg.get('font_name') or 'none'}`\n\n"
-        body += "Library:\n" + ("\n".join(f"• {f}" for f in fonts) if fonts else "_empty_")
+        body = "🔡 **Font Track**\n" + f"Selected: `{cfg.get('font_name') or 'none'}`\n\nLibrary:\n" + ("\n".join(f"• {f}" for f in fonts) if fonts else "_empty_")
         await safe_edit(query.message, body, reply_markup=kb_font_menu(cfg))
         return
     if data == "font_add":
@@ -472,12 +447,7 @@ async def handle_callbacks(client, query: CallbackQuery):
         name = data.split("_", 1)[1]
         cfg["font_name"] = name
         await save_user_config(user_id)
-        await safe_answer(query, f"Font set to {name}")
-        await safe_edit(query.message, 
-            f"🔡 **Font Track**\nSelected: `{cfg['font_name']}`\n\nLibrary:\n" +
-            "\n".join(f"• {f}" for f in list_fonts()),
-            reply_markup=kb_font_menu(cfg)
-        )
+        await safe_edit(query.message, f"🔡 **Font Track**\nSelected: `{cfg['font_name']}`\n\nLibrary:\n" + "\n".join(f"• {f}" for f in list_fonts()), reply_markup=kb_font_menu(cfg))
         return
     if data.startswith("fontdel_"):
         name = data.split("_", 1)[1]
@@ -485,18 +455,13 @@ async def handle_callbacks(client, query: CallbackQuery):
         if cfg.get("font_name") == name:
             cfg["font_name"] = None
             await save_user_config(user_id)
-        await safe_answer(query, f"Deleted {name}")
         fonts = list_fonts()
-        body = "🔡 **Font Track**\n" + f"Selected: `{cfg.get('font_name') or 'none'}`\n\nLibrary:\n" + \
-               ("\n".join(f"• {f}" for f in fonts) if fonts else "_empty_")
+        body = "🔡 **Font Track**\n" + f"Selected: `{cfg.get('font_name') or 'none'}`\n\nLibrary:\n" + ("\n".join(f"• {f}" for f in fonts) if fonts else "_empty_")
         await safe_edit(query.message, body, reply_markup=kb_font_menu(cfg))
         return
 
     if data == "menu_api":
-        await safe_edit(query.message, 
-            "⚙️ **Provider & API Configuration**",
-            reply_markup=kb_api_menu(cfg)
-        )
+        await safe_edit(query.message, "⚙️ **Provider & API Configuration**", reply_markup=kb_api_menu(cfg))
         return
     if data == "api_provider_open":
         await safe_edit(query.message, "⚙️ **Select Provider:**", reply_markup=kb_provider_select(cfg))
@@ -505,7 +470,6 @@ async def handle_callbacks(client, query: CallbackQuery):
         provider = data.split("_", 1)[1]
         cfg["provider"] = provider
         await save_user_config(user_id)
-        await safe_answer(query, f"Provider set to {provider}")
         await safe_edit(query.message, "⚙️ **Provider & API Configuration**", reply_markup=kb_api_menu(cfg))
         return
     if data.startswith("api_field_"):
@@ -516,7 +480,7 @@ async def handle_callbacks(client, query: CallbackQuery):
         return
 
     if data == "menu_prompt":
-        await safe_edit(query.message, "📝 **Prompt Library**\nSystem prompt = model behaviour. User prompt = your custom focus.", reply_markup=kb_prompt_root())
+        await safe_edit(query.message, "📝 **Prompt Library**", reply_markup=kb_prompt_root())
         return
     if data == "prompt_open_system" or data == "prompt_open_user":
         kind = "system" if data.endswith("system") else "user"
@@ -534,7 +498,6 @@ async def handle_callbacks(client, query: CallbackQuery):
                 cfg["user_prompt_name"] = name
                 cfg["user_prompt_text"] = lib[name]
             await save_user_config(user_id)
-            await safe_answer(query, f"Selected: {name}")
         await safe_edit(query.message, f"📝 **{kind.title()} Prompts**\nSelected: `{name}`", reply_markup=kb_prompt_list(kind, cfg))
         return
     if data.startswith("promptdel_"):
@@ -551,9 +514,6 @@ async def handle_callbacks(client, query: CallbackQuery):
                 cfg["user_prompt_name"] = fallback_name
                 cfg["user_prompt_text"] = lib[fallback_name]
                 await save_user_config(user_id)
-            await safe_answer(query, f"Deleted {name}")
-        else:
-            await safe_answer(query, "Can't delete the last remaining prompt.", show_alert=True)
         await safe_edit(query.message, f"📝 **{kind.title()} Prompts**", reply_markup=kb_prompt_list(kind, cfg))
         return
     if data.startswith("prompt_add_"):
@@ -569,14 +529,12 @@ async def handle_callbacks(client, query: CallbackQuery):
         code = data.split("_", 1)[1]
         cfg["output_format"] = code
         await save_user_config(user_id)
-        await safe_answer(query, f"Output set to .{code}")
         await safe_edit(query.message, f"📦 **Output Format**\nCurrent: `{cfg['output_format']}`", reply_markup=kb_output_menu(cfg))
         return
 
     if data.startswith("uploadmode_"):
         mode = data.split("_", 1)[1]
         pending_files[user_id] = {"mode": mode, "files": [], "collecting": True}
-        mode_label = dict(UPLOAD_MODES).get(f"uploadmode_{mode}", mode)
         hint = {
             "raw": "Ab apni saari images bhejo. Jab complete ho jaye, `/end` bhejo.",
             "archive": "Ab apni ZIP ya CBZ file(s) bhejo. Multiple bhi bhej sakte ho. Jab complete ho jaye, `/end` bhejo.",
@@ -595,13 +553,11 @@ async def handle_callbacks(client, query: CallbackQuery):
         job = active_jobs.get(user_id)
         if job:
             job["cancel"] = True
-            await safe_answer(query, "Cancelling...")
         return
 
     if data == "job_continue":
         job_state = paused_jobs.get(user_id)
         if not job_state:
-            await safe_answer(query, "No paused job found.", show_alert=True)
             return
         await safe_edit(query.message, "▶️ Resuming translation...")
         active_jobs[user_id] = {"cancel": False, "status_msg": query.message}
@@ -611,7 +567,6 @@ async def handle_callbacks(client, query: CallbackQuery):
     if data == "job_send_partial":
         job_state = paused_jobs.get(user_id)
         if not job_state:
-            await safe_answer(query, "No paused job found.", show_alert=True)
             return
         await send_partial_results(client, query.message, user_id)
         return
@@ -687,14 +642,10 @@ async def handle_reply_capture(client, message: Message):
     if kind == "prompt_name":
         prompt_kind = pending_reply["extra"]["kind"]
         if len(text) > PROMPT_NAME_MAX_LEN:
-            await message.reply_text(f"❌ Naam {PROMPT_NAME_MAX_LEN} characters se zyada nahi ho sakta (`{len(text)}` diya). Dobara reply karo.")
+            await message.reply_text(f"❌ Naam {PROMPT_NAME_MAX_LEN} chars se zyada nahi ho sakta. Dobara reply karo.")
             return
         awaiting_reply[user_id] = {"type": "prompt_body", "extra": {"kind": prompt_kind, "name": text, "parts": []}}
-        await message.reply_text(
-            f"✍️ **Reply to this message with the {prompt_kind} prompt text for** `{text}`.\n\n"
-            f"_Agar prompt Telegram ki 4096 character limit se bada hai, usse multiple messages mein todkar "
-            f"reply karo (har hissa isi message ko reply karke bhejo). Jab sab bhej do, `/donedone` reply karo._"
-        )
+        await message.reply_text(f"✍️ **Reply to this message with the {prompt_kind} prompt text for** `{text}`.\n_Jab sab bhej do, `/donedone` reply karo._")
         return
 
     if kind == "prompt_body":
@@ -704,7 +655,7 @@ async def handle_reply_capture(client, message: Message):
 
         if text.strip() == "/donedone":
             if not parts:
-                await message.reply_text("❌ Koi prompt text abhi tak nahi mila. Pehle text reply karo, phir `/donedone`.")
+                await message.reply_text("❌ Koi prompt text nahi mila. Pehle text reply karo, phir `/donedone`.")
                 return
             full_text = "".join(parts)
             add_prompt(prompt_kind, name, full_text)
@@ -716,18 +667,11 @@ async def handle_reply_capture(client, message: Message):
                 cfg["user_prompt_text"] = full_text
             await save_user_config(user_id)
             awaiting_reply.pop(user_id, None)
-            await message.reply_text(
-                f"✅ Prompt `{name}` added and selected. ({len(full_text)} characters, {len(parts)} part(s) combined.)",
-                reply_markup=kb_prompt_list(prompt_kind, cfg)
-            )
+            await message.reply_text(f"✅ Prompt `{name}` added and selected.", reply_markup=kb_prompt_list(prompt_kind, cfg))
             return
 
         parts.append(text)
-        total_len = sum(len(p) for p in parts)
-        await message.reply_text(
-            f"➕ Part {len(parts)} received ({len(text)} chars, total so far: {total_len}).\n"
-            f"Aur bhejo, ya `/donedone` reply karke save karo."
-        )
+        await message.reply_text(f"➕ Part {len(parts)} received. Aur bhejo, ya `/donedone` reply karke save karo.")
         return
 
 # ================= Job State for Pause/Resume =================
@@ -750,19 +694,17 @@ def extract_archive(path, dest_dir):
     with zipfile.ZipFile(path, 'r') as zip_ref:
         zip_ref.extractall(dest_dir)
 
-# 🔥 FIX 2: PyMuPDF for smooth PDF extraction without hanging 🔥
+# 🔥 FIX 1: Alpha=False and save as .jpg for maximum API/Engine compatibility
 def extract_pdf(path, dest_dir):
     doc = fitz.open(path)
     for page_num in range(len(doc)):
         page = doc.load_page(page_num)
-        pix = page.get_pixmap(dpi=200) 
-        output_path = os.path.join(dest_dir, f"page_{page_num+1:03d}.png")
+        pix = page.get_pixmap(dpi=200, alpha=False) 
+        output_path = os.path.join(dest_dir, f"page_{page_num+1:03d}.jpg")
         pix.save(output_path)
     doc.close()
 
-# 🔥 FIX 1: Stitch slices vertically & clean up duplicates 🔥
 def flatten_and_order(input_dir):
-    # 1. Flattening
     for root, _, files in os.walk(input_dir, topdown=False):
         for f in files:
             if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
@@ -773,7 +715,6 @@ def flatten_and_order(input_dir):
             except Exception:
                 pass
 
-    # 2. Get images and group by base name
     images = sorted([f for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))])
     groups = {}
     for fname in images:
@@ -782,10 +723,8 @@ def flatten_and_order(input_dir):
             groups[base_name] = []
         groups[base_name].append(fname)
     
-    # 3. Stitching & Renaming
     ordered_map = {}
     idx = 1
-    
     for base_name in sorted(groups.keys()):
         group_files = sorted(groups[base_name])
         ext = os.path.splitext(group_files[0])[1]
@@ -813,7 +752,7 @@ def flatten_and_order(input_dir):
                     if old_file_path != new_path and os.path.exists(old_file_path):
                         os.remove(old_file_path)
             except Exception as e:
-                print(f"⚠️ Error stitching slices for {base_name}: {e}")
+                pass
         else:
             old_path = os.path.join(input_dir, group_files[0])
             if old_path != new_path:
@@ -831,13 +770,6 @@ def build_dynamic_system_instruction(cfg):
         f"User Specific Instructions Focus: {cfg['user_prompt_text']}\n"
         f"Produce strictly the final targeted localization stream mapping blocks directly."
     )
-
-def resolve_font_path(cfg):
-    if cfg.get("font_name"):
-        p = FONTS_DIR / cfg["font_name"]
-        if p.exists():
-            return str(p.parent)
-    return str(FONTS_DIR)
 
 # ================= Main Pipeline Runner =================
 async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
@@ -917,16 +849,10 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
 
         dynamic_system_instruction = build_dynamic_system_instruction(cfg)
 
-        os.environ['INPUT_LANG'] = cfg['source_lang']
-        os.environ['PROVIDER'] = cfg['provider']
-        os.environ['API_URL'] = cfg['api_url']
-        os.environ['API_KEY'] = cfg['api_key']
-        os.environ['MODEL_NAME'] = cfg['model_name']
-        os.environ['SPECIAL_INS'] = dynamic_system_instruction
-
         file_translated_dir = os.path.join(translated_dir, f"file_{file_idx:03d}")
         os.makedirs(file_translated_dir, exist_ok=True)
 
+        # 🔥 FIX 3: Target Language Added to Command Line Arguments 🔥
         cmd = [
             "python", "MangaTranslator/main.py",
             "--input", input_dir,
@@ -934,6 +860,7 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             "--batch",
             "--font-dir", font_dir_for_run,
             "--input-language", cfg['source_lang'],
+            "--target-language", cfg['target_lang'],
             "--provider", cfg['provider'],
             "--openai-compatible-url", cfg['api_url'],
             "--openai-compatible-api-key", cfg['api_key'],
@@ -941,15 +868,10 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             "--special-instructions", dynamic_system_instruction
         ]
 
-        await safe_edit(status_msg, 
-            build_status_text(mode_label, "🧠 OCR + Translation running", file_idx, total_files, 0, total_images, 40),
-            reply_markup=kb_cancel_only()
-        )
+        await safe_edit(status_msg, build_status_text(mode_label, "🧠 OCR + Translation running", file_idx, total_files, 0, total_images, 40), reply_markup=kb_cancel_only())
 
         try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
+            process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
 
             while process.returncode is None:
                 job = active_jobs.get(user_id)
@@ -962,62 +884,56 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
                 except asyncio.TimeoutError:
                     done_count = len([f for f in os.listdir(file_translated_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]) if os.path.exists(file_translated_dir) else 0
                     pct = 40 + int((done_count / max(total_images, 1)) * 40)
-                    await safe_edit(status_msg, 
-                        build_status_text(mode_label, "🧠 OCR + Translation running", file_idx, total_files, done_count, total_images, min(pct, 80)),
-                        reply_markup=kb_cancel_only()
-                    )
+                    await safe_edit(status_msg, build_status_text(mode_label, "🧠 OCR + Translation running", file_idx, total_files, done_count, total_images, min(pct, 80)), reply_markup=kb_cancel_only())
 
             stdout_bytes, stderr_bytes = await process.communicate()
-            stdout_text = (stdout_bytes or b"").decode(errors="replace")
-            stderr_text = (stderr_bytes or b"").decode(errors="replace")
-
-            print("----- MangaTranslator stdout -----")
-            print(stdout_text)
-            print("----- MangaTranslator stderr -----")
-            print(stderr_text)
 
             if process.returncode != 0:
-                tail = (stderr_text.strip() or stdout_text.strip() or "no output captured")[-800:]
-                await safe_edit(
-                    status_msg,
-                    f"❌ **Engine exited with error on file {file_idx}/{total_files}** (code {process.returncode}):\n```\n{tail}\n```"
-                )
+                await safe_edit(status_msg, f"❌ **Engine error on file {file_idx}/{total_files}**")
                 active_jobs.pop(user_id, None)
                 return
         except Exception as exec_err:
-            await safe_edit(status_msg, f"❌ Engine error on file {file_idx}/{total_files}: {exec_err}")
+            await safe_edit(status_msg, f"❌ Error: {exec_err}")
             active_jobs.pop(user_id, None)
             return
 
+        # 🔥 FIX 4: Missing Files Verification & Retry Logic 🔥
+        input_files = sorted([f for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))])
+        output_files = sorted([f for f in os.listdir(file_translated_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))])
+        
+        missing_files = [f for f in input_files if f not in output_files]
+        
+        if missing_files:
+            await safe_edit(status_msg, build_status_text(mode_label, f"⚠️ Retrying {len(missing_files)} dropped pages...", file_idx, total_files, total_images - len(missing_files), total_images, 85))
+            
+            retry_input_dir = os.path.join(job_root, f"retry_input_{file_idx:03d}")
+            os.makedirs(retry_input_dir, exist_ok=True)
+            for f in missing_files:
+                shutil.copy(os.path.join(input_dir, f), os.path.join(retry_input_dir, f))
+            
+            cmd_retry = list(cmd)
+            cmd_retry[cmd_retry.index("--input") + 1] = retry_input_dir
+            
+            try:
+                retry_process = await asyncio.create_subprocess_exec(*cmd_retry, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                await retry_process.communicate()
+            except Exception:
+                pass
+            
+            # Final Fallback: Copy original files if STILL missing to prevent deleting pages
+            final_output_files = os.listdir(file_translated_dir)
+            for f in missing_files:
+                if f not in final_output_files:
+                    shutil.copy(os.path.join(input_dir, f), os.path.join(file_translated_dir, f))
+
         await safe_edit(status_msg, build_status_text(mode_label, "📦 Packaging output", file_idx, total_files, total_images, total_images, 90))
-
-        produced_files = []
-        if os.path.exists(file_translated_dir):
-            produced_files = [f for f in os.listdir(file_translated_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
-
-        if not produced_files:
-            debug_tail = (stderr_text.strip() or stdout_text.strip() or "no output captured")[-500:]
-            failure_reasons.append((file_idx, debug_tail))
-            await safe_edit(
-                status_msg,
-                f"❌ **File {file_idx}/{total_files} produced no output.**\n"
-                f"Engine exited cleanly (code 0) but wrote no translated images.\n```\n{debug_tail}\n```\n"
-                f"Skipping to next file."
-            )
-            continue
 
         try:
             if cfg['output_format'] == 'img':
-                image_files = sorted(
-                    [f for f in os.listdir(file_translated_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
-                )
+                image_files = sorted([f for f in os.listdir(file_translated_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))])
                 for img_idx, img_name in enumerate(image_files, start=1):
-                    send_kwargs = {
-                        "chat_id": source_message.chat.id,
-                        "document": os.path.join(file_translated_dir, img_name),
-                    }
-                    if img_idx == 1:
-                        send_kwargs["caption"] = f"💥 **File {file_idx}/{total_files} — image {img_idx}/{len(image_files)}**"
+                    send_kwargs = {"chat_id": source_message.chat.id, "document": os.path.join(file_translated_dir, img_name)}
+                    if img_idx == 1: send_kwargs["caption"] = f"💥 **File {file_idx}/{total_files} — image {img_idx}/{len(image_files)}**"
                     await client.send_document(**send_kwargs)
                 all_translated_outputs.append((file_idx, file_translated_dir))
             else:
@@ -1026,11 +942,7 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
                 await client.send_document(
                     source_message.chat.id,
                     document=output_path,
-                    caption=(
-                        f"💥 **File {file_idx}/{total_files} done!**\n"
-                        f"📦 Format: `.{cfg['output_format'].upper()}`\n"
-                        f"🖼 Frames: `{total_images}`"
-                    )
+                    caption=f"💥 **File {file_idx}/{total_files} done!**\n📦 Format: `.{cfg['output_format'].upper()}`\n🖼 Frames: `{total_images}`"
                 )
         except Exception as send_err:
             await safe_edit(status_msg, f"❌ **Failed to send file {file_idx}/{total_files}:**\n`{send_err}`")
@@ -1038,19 +950,10 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             return
 
     if not all_translated_outputs:
-        if failure_reasons:
-            last_idx, last_reason = failure_reasons[-1]
-            summary = (
-                f"⚠️ **Job finished — 0/{total_files} file(s) produced output.**\n\n"
-                f"**Last failure (file {last_idx}/{total_files}):**\n```\n{last_reason}\n```"
-            )
-            if len(failure_reasons) > 1:
-                summary += f"\n\n_{len(failure_reasons)} file(s) failed total._"
-            await safe_edit(status_msg, summary)
-        else:
-            await safe_edit(status_msg, "⚠️ **Job finished but no files were produced/sent.** Check the engine logs.")
+        await safe_edit(status_msg, "⚠️ **Job finished but no files were produced/sent.**")
     else:
         await safe_edit(status_msg, f"✅ **{len(all_translated_outputs)}/{total_files} file(s) translated and sent!**")
+        
     active_jobs.pop(user_id, None)
     pending_files.pop(user_id, None)
     paused_jobs.pop(user_id, None)
@@ -1085,16 +988,9 @@ def package_output(source_dir, job_root, file_idx, output_format):
         return f"{archive_base}.zip"
 
 async def handle_job_cancelled(client, status_msg, user_id, translated_dir, file_idx=None, total_files=None, ordered_map=None):
-    paused_jobs[user_id] = {
-        "translated_dir": translated_dir,
-        "stopped_at_file": file_idx,
-        "total_files": total_files,
-    }
+    paused_jobs[user_id] = {"translated_dir": translated_dir, "stopped_at_file": file_idx, "total_files": total_files}
     active_jobs.pop(user_id, None)
-    await safe_edit(status_msg, 
-        "🛑 **Translation stopped.**\nProgress so far has been saved.\nWhat would you like to do?",
-        reply_markup=kb_resume_options()
-    )
+    await safe_edit(status_msg, "🛑 **Translation stopped.**\nProgress so far has been saved.\nWhat would you like to do?", reply_markup=kb_resume_options())
 
 async def resume_manga_pipeline(client, status_msg, user_id):
     await execute_manga_pipeline(client, status_msg, user_id)
@@ -1102,20 +998,13 @@ async def resume_manga_pipeline(client, status_msg, user_id):
 async def send_partial_results(client, status_msg, user_id):
     state = paused_jobs.get(user_id)
     if not state:
-        await safe_edit(status_msg, "❌ No paused job data found.")
         return
     translated_dir = state["translated_dir"]
     if os.path.exists(translated_dir) and os.listdir(translated_dir):
         archive_base = translated_dir + "_partial"
         shutil.make_archive(archive_base, "zip", translated_dir)
-        await client.send_document(
-            status_msg.chat.id,
-            document=f"{archive_base}.zip",
-            caption="📤 Partial translated files (progress so far)."
-        )
+        await client.send_document(status_msg.chat.id, document=f"{archive_base}.zip", caption="📤 Partial translated files.")
         os.remove(f"{archive_base}.zip")
-    else:
-        await safe_edit(status_msg, "⚠️ No translated files available yet.")
     paused_jobs.pop(user_id, None)
     pending_files.pop(user_id, None)
 

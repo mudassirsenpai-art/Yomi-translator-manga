@@ -844,6 +844,7 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
 
     total_files = len(files)
     all_translated_outputs = []  # list of (index, output_path) to send in order at the end
+    failure_reasons = []  # list of (file_idx, reason_text) for files that produced no output
     resume_from = paused_jobs.pop(user_id, {}).get("stopped_at_file") or 1
 
     for file_idx, source_message in enumerate(files, start=1):
@@ -971,7 +972,8 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             produced_files = [f for f in os.listdir(file_translated_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
 
         if not produced_files:
-            debug_tail = (stderr_text.strip() or stdout_text.strip() or "no output captured")[-800:]
+            debug_tail = (stderr_text.strip() or stdout_text.strip() or "no output captured")[-500:]
+            failure_reasons.append((file_idx, debug_tail))
             await safe_edit(
                 status_msg,
                 f"❌ **File {file_idx}/{total_files} produced no output.**\n"
@@ -999,7 +1001,17 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             return
 
     if not all_translated_outputs:
-        await safe_edit(status_msg, "⚠️ **Job finished but no files were produced/sent.** Check the engine logs.")
+        if failure_reasons:
+            last_idx, last_reason = failure_reasons[-1]
+            summary = (
+                f"⚠️ **Job finished — 0/{total_files} file(s) produced output.**\n\n"
+                f"**Last failure (file {last_idx}/{total_files}):**\n```\n{last_reason}\n```"
+            )
+            if len(failure_reasons) > 1:
+                summary += f"\n\n_{len(failure_reasons)} file(s) failed total._"
+            await safe_edit(status_msg, summary)
+        else:
+            await safe_edit(status_msg, "⚠️ **Job finished but no files were produced/sent.** Check the engine logs.")
     else:
         await safe_edit(status_msg, f"✅ **{len(all_translated_outputs)}/{total_files} file(s) translated and sent!**")
     active_jobs.pop(user_id, None)

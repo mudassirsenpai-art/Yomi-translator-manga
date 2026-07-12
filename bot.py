@@ -862,10 +862,17 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
         await safe_edit(status_msg, build_status_text(mode_label, "📥 Downloading payload", file_idx, total_files, 0, 0, 5))
         downloaded_path = await source_message.download(file_name=os.path.join(job_root, f"src_{file_idx:03d}"))
 
-        # Renaming: pyrogram won't preserve extension automatically for arbitrary file_name, so fix it.
-        orig_name = source_message.document.file_name if source_message.document else None
-        if orig_name:
-            ext = os.path.splitext(orig_name)[1]
+        # Renaming: pyrogram doesn't always preserve/add an extension, so fix it explicitly.
+        # - message.document: use its original filename's extension.
+        # - message.photo: Telegram compresses photos to JPEG, so force .jpg.
+        if source_message.document and source_message.document.file_name:
+            ext = os.path.splitext(source_message.document.file_name)[1] or ".jpg"
+        elif source_message.photo:
+            ext = ".jpg"
+        else:
+            ext = ""
+
+        if ext and not downloaded_path.lower().endswith(ext.lower()):
             fixed_path = downloaded_path + ext
             os.rename(downloaded_path, fixed_path)
             downloaded_path = fixed_path

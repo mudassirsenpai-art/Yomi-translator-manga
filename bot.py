@@ -91,11 +91,12 @@ CONTENT_TYPES = [
     ("📝 Novel (text only)", "novel"),
 ]
 
-# Tiling parameters for long-strip Manhwa. Each tile is TILE_HEIGHT tall with
-# TILE_OVERLAP px shared between consecutive tiles so a bubble that straddles
-# a cut line still appears whole in at least one tile.
+# Tiling parameters for long-strip Manhwa. Tiles target roughly TILE_HEIGHT
+# tall, but the actual cut point is snapped to the nearest "safe" (blank/flat)
+# row within +/- MANHWA_TILE_SEARCH_RADIUS px, so a cut never lands in the
+# middle of a speech bubble or dense artwork. See tile_tall_pages().
 MANHWA_TILE_HEIGHT = 1600
-MANHWA_TILE_OVERLAP = 200
+MANHWA_TILE_OVERLAP = 350  # reused as the safe-cut search radius (+/- px)
 # Only kick in tiling once a stitched page exceeds this height - short
 # Manhwa pages behave fine as a single image and tiling would just add
 # unnecessary subprocess calls.
@@ -1052,13 +1053,70 @@ def flatten_and_order(input_dir, content_type="manhwa"):
 # (MANHWA_TILE_OVERLAP) ensures a bubble that straddles a cut line still
 # appears whole in at least one tile.
 
+def _compute_row_flatness(im):
+    """
+    Returns a numpy array of per-row standard deviation (lower = flatter/more
+    uniform = safer to cut on - a gutter between panels, or plain background
+    around a bubble, rather than the middle of bubble text, an outline, or
+    dense artwork).
+    """
+    import numpy as np
+    gray = im.convert("L")
+    arr = np.asarray(gray, dtype=np.float32)
+    return arr.std(axis=1)
+
+def _find_safe_cut_row(row_flatness, target_y, search_window, min_y, max_y, flat_threshold=6.0):
+    """
+    Finds a cut row near target_y that avoids slicing through a bubble.
+    Strategy:
+      1. If target_y itself is already flat enough, use it.
+      2. Otherwise scan outward within +/- search_window for the nearest row
+         that clears the flatness threshold.
+      3. If NOTHING in the window clears the threshold (e.g. target_y sits
+         inside a long stretch of dense, evenly-toned artwork with no true
+         gutter nearby), fall back to whichever row in the window is
+         LOCALLY FLATTEST rather than blindly using target_y. This still
+         nearly always lands outside actual bubble text (bubble interiors
+         are near-solid white/flat, but bubble OUTLINES and letters are the
+         highest-contrast rows on the page) even when it can't find a
+         perfect full-width gutter.
+    """
+    if row_flatness[target_y] < flat_threshold:
+        return target_y
+    for delta in range(1, search_window + 1):
+        up = target_y - delta
+        down = target_y + delta
+        if down <= max_y and row_flatness[down] < flat_threshold:
+            return down
+        if up >= min_y and row_flatness[up] < flat_threshold:
+            return up
+    # No row cleanly passed the threshold - use the flattest row available
+    # in the window instead of giving up and using target_y unconditionally.
+    lo = max(min_y, target_y - search_window)
+    hi = min(max_y, target_y + search_window)
+    window = row_flatness[lo:hi + 1]
+    best_offset = int(window.argmin())
+    return lo + best_offset
+
 def tile_tall_pages(input_dir, ordered_map):
     """
     For every page taller than MANHWA_TILE_TRIGGER_HEIGHT, slice it into
-    overlapping tiles saved as `{page}_tile{n}.jpg` and remove the original
-    tall page. Returns a manifest dict:
+    tiles saved as `{page}_tile{n}.jpg` and remove the original tall page.
+
+    Unlike naive fixed-height slicing, cut lines are snapped to nearby
+    "safe" rows (flat/blank background between bubbles or panels) found by
+    scanning the ORIGINAL (untranslated) image. This avoids the duplicate-
+    text bug that a fixed-overlap-then-crop approach produces: if a tile
+    boundary lands inside a speech bubble, the translator renders that whole
+    bubble in BOTH tiles independently, and a blind pixel-offset crop can't
+    tell where the real bubble edges are, so the text visibly repeats after
+    recomposition. Cutting only on blank rows means no bubble/panel is ever
+    split across two tiles in the first place, so tiles can be joined with a
+    plain edge-to-edge stitch and no overlap/crop guesswork is needed.
+
+    Returns a manifest dict:
         { page_idx: {"tiles": [tile_filename, ...], "heights": [...],
-                     "overlap": px, "width": px} }
+                     "width": px, "original_height": px, "original_name": ...} }
     Pages at/under the trigger height are left completely untouched and are
     absent from the manifest.
     """
@@ -1074,27 +1132,34 @@ def tile_tall_pages(input_dir, ordered_map):
                 continue  # short enough for the detector as-is, skip tiling
 
             im = im.convert("RGB")
-            stride = MANHWA_TILE_HEIGHT - MANHWA_TILE_OVERLAP
+            row_flatness = _compute_row_flatness(im)
+            search_window = MANHWA_TILE_OVERLAP  # reuse as the +/- search radius
+
             tile_files = []
             tile_heights = []
             y = 0
             tile_n = 0
             while y < height:
-                tile_bottom = min(y + MANHWA_TILE_HEIGHT, height)
-                tile = im.crop((0, y, width, tile_bottom))
+                target_bottom = min(y + MANHWA_TILE_HEIGHT, height)
+                if target_bottom < height:
+                    # Snap to the nearest blank row so we never cut mid-bubble.
+                    cut = _find_safe_cut_row(row_flatness, target_bottom, search_window, y + 1, height - 1)
+                else:
+                    cut = height
+
+                tile = im.crop((0, y, width, cut))
                 tile_name = f"{os.path.splitext(fname)[0]}_tile{tile_n:03d}.jpg"
                 tile.save(os.path.join(input_dir, tile_name), quality=95)
                 tile_files.append(tile_name)
-                tile_heights.append(tile_bottom - y)
+                tile_heights.append(cut - y)
                 tile_n += 1
-                if tile_bottom >= height:
+                if cut >= height:
                     break
-                y += stride
+                y = cut
 
             manifest[idx] = {
                 "tiles": tile_files,
                 "heights": tile_heights,
-                "overlap": MANHWA_TILE_OVERLAP,
                 "width": width,
                 "original_height": height,
                 "original_name": fname,
@@ -1104,16 +1169,18 @@ def tile_tall_pages(input_dir, ordered_map):
 
 def recompose_tiled_page(translated_dir, page_idx, manifest_entry):
     """
-    Stitches translated tile outputs back into one tall page image, trimming
-    the overlap region from every tile after the first so overlapping text
-    doesn't appear duplicated in the final output. Returns the output path,
-    or None if any translated tile is missing (caller should treat that page
-    as a partial/failed translation rather than silently shipping gaps).
+    Stitches translated tile outputs back into one tall page image with a
+    plain edge-to-edge join (no overlap trimming needed): tiles were cut on
+    safe/blank rows in the original image, so no bubble or panel spans two
+    tiles, and each tile's full height can be pasted back exactly where it
+    came from without any risk of duplicated text at the seams.
+    Returns the output path, or None if any translated tile is missing
+    (caller should treat that page as a partial/failed translation rather
+    than silently shipping gaps).
     """
     from PIL import Image
     tiles = manifest_entry["tiles"]
     heights = manifest_entry["heights"]
-    overlap = manifest_entry["overlap"]
     width = manifest_entry["width"]
     total_height = manifest_entry["original_height"]
 
@@ -1139,12 +1206,8 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry):
             # tile dimensions slightly (e.g. rounding during upscale/cleanup).
             if tile_im.size != (width, heights[i]):
                 tile_im = tile_im.resize((width, heights[i]))
-            # Trim the top overlap from every tile after the first, since
-            # that region was already painted by the previous tile's bottom.
-            crop_top = overlap if i > 0 else 0
-            visible = tile_im.crop((0, crop_top, width, heights[i]))
-            recomposed.paste(visible, (0, y_cursor))
-            y_cursor += visible.height
+            recomposed.paste(tile_im, (0, y_cursor))
+            y_cursor += tile_im.height
 
     out_name = manifest_entry["original_name"]
     out_path = os.path.join(translated_dir, out_name)

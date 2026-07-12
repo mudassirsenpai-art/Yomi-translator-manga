@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
+from PIL import Image
+import fitz  # PyMuPDF for smooth PDF extraction
 
 # ================= Configuration & Secrets =================
 API_ID = int(os.environ.get("API_ID", 0))
@@ -24,7 +26,6 @@ AUTHORIZED_USERS = [int(u.strip()) for u in AUTH_USERS_STR.split(",") if u.strip
 app = Client("YomiTranslatorBot", bot_token=BOT_TOKEN, api_id=API_ID, api_hash=API_HASH)
 
 # ================= Persistent Storage Paths =================
-# Runner par ye repo ke andar rehte hain, taake font/prompt library commit hoke persist ho.
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "bot_data"
 FONTS_DIR = DATA_DIR / "fonts"
@@ -97,9 +98,9 @@ def _save_all_settings(data):
     USERS_FILE.write_text(json.dumps(data, indent=2))
 
 user_settings = _load_all_settings()
-pending_files = {}   # user_id -> {"mode": "raw"/"archive"/"pdf", "files": [Message,...], "collecting": bool}
-active_jobs = {}      # user_id -> {"cancel": bool, "status_msg": Message}
-awaiting_reply = {}   # user_id -> {"type": "custom_lang"/"font_upload"/"prompt_name"/"prompt_body"/"api_field", "extra": {...}}
+pending_files = {}   
+active_jobs = {}      
+awaiting_reply = {}   
 
 def default_config():
     return {
@@ -107,7 +108,7 @@ def default_config():
         "source_lang_label": "Auto Detect",
         "target_lang": "Roman Hindi",
         "target_lang_label": "Hindi (Roman)",
-        "font_name": None,           # currently selected font filename
+        "font_name": None,           
         "provider": "OpenAI-Compatible",
         "api_url": "https://api.highwayapi.ai/openai",
         "api_key": "",
@@ -132,7 +133,6 @@ async def save_user_config(user_id):
 
 # ================= Prompt Library Helpers =================
 def _prompt_lib_file(kind):
-    # kind: "system" or "user"
     return PROMPTS_DIR / f"{kind}_prompts.json"
 
 def load_prompt_library(kind):
@@ -179,14 +179,13 @@ def delete_font(name):
 
 # ================= Git Persistence (GitHub Actions runner) =================
 def git_commit_data(message):
-    """Commit bot_data/ changes so fonts & prompts persist across ephemeral runner jobs."""
     try:
         subprocess.run(["git", "add", str(DATA_DIR)], cwd=str(BASE_DIR), check=False,
                         capture_output=True)
         result = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=str(BASE_DIR),
                                  capture_output=True)
         if result.returncode == 0:
-            return  # nothing changed
+            return  
         subprocess.run(["git", "-c", "user.email=bot@yomisubs.local",
                          "-c", "user.name=YomiSubsBot",
                          "commit", "-m", message], cwd=str(BASE_DIR), check=False,
@@ -195,23 +194,17 @@ def git_commit_data(message):
     except Exception as e:
         print(f"⚠️ Git persistence skipped: {e}")
 
-
 # ================= Limits =================
-PROMPT_NAME_MAX_LEN = 32  # only limit that exists anywhere in this bot
+PROMPT_NAME_MAX_LEN = 32  
 
 # ================= Safe Telegram UI Helpers =================
-# Prevents "stuck button" bug: Telegram keeps a button's loading spinner active
-# until callback_query.answer() is called, and if edit_text() throws (e.g.
-# "message is not modified" or a network hiccup) the handler used to crash
-# before ever answering the query, leaving the old menu frozen on screen.
 async def safe_edit(message, text, reply_markup=None):
     try:
         await message.edit_text(text, reply_markup=reply_markup)
     except Exception as e:
         err = str(e).lower()
         if "not modified" in err:
-            return  # content identical, nothing to do
-        # Any other failure: try to at least refresh the markup, else swallow
+            return  
         try:
             await message.edit_text(text + " ", reply_markup=reply_markup)
         except Exception as e2:
@@ -397,9 +390,6 @@ async def cancel_cmd(client, message: Message):
         await message.reply_text("✅ Session cleared.")
 
 # ================= Safe Background Task Runner =================
-# asyncio.create_task() silently swallows exceptions if the task's result is
-# never awaited/checked. That was the cause of jobs freezing at "Downloading
-# payload" with no error shown - any exception in the pipeline just vanished.
 def run_job(coro, status_msg, user_id):
     async def _runner():
         try:
@@ -420,34 +410,24 @@ async def handle_callbacks(client, query: CallbackQuery):
     data = query.data
     user_id = query.from_user.id
     cfg = get_user_config(user_id)
-
-    # Answer immediately so the button never stays stuck in a loading state,
-    # even if something below raises. Branches that want a custom toast text
-    # call safe_answer(query, "...") again later, which is harmless (Telegram
-    # ignores a second answer silently on the client side after the first).
     await safe_answer(query)
 
-    # ---------- Main Menu ----------
     if data == "main_menu":
         await safe_edit(query.message, "🛠 **Settings**\nChoose a category to configure:", reply_markup=kb_main_menu())
         return
 
-    # ---------- Language Menu ----------
     if data == "menu_lang":
         await safe_edit(query.message, 
             f"🌐 **Language Settings**\nSource: `{cfg['source_lang_label']}`\nTarget: `{cfg['target_lang_label']}`\n\nTap a field to change it:",
             reply_markup=kb_lang_root(cfg)
         )
         return
-
     if data == "lang_src_open":
         await safe_edit(query.message, "🌐 **Select Source Language:**", reply_markup=kb_source_select(cfg))
         return
-
     if data == "lang_tgt_open":
         await safe_edit(query.message, "🌐 **Select Target Language:**", reply_markup=kb_target_select(cfg))
         return
-
     if data.startswith("srcset_"):
         code = data.split("_", 1)[1]
         label = next((l for l, c in SOURCE_LANGS if c == code), code)
@@ -460,7 +440,6 @@ async def handle_callbacks(client, query: CallbackQuery):
             reply_markup=kb_lang_root(cfg)
         )
         return
-
     if data.startswith("tgtset_"):
         value = data.split("_", 1)[1]
         if value == "custom":
@@ -478,7 +457,6 @@ async def handle_callbacks(client, query: CallbackQuery):
         )
         return
 
-    # ---------- Font Menu ----------
     if data == "menu_font":
         fonts = list_fonts()
         body = "🔡 **Font Track**\n"
@@ -486,12 +464,10 @@ async def handle_callbacks(client, query: CallbackQuery):
         body += "Library:\n" + ("\n".join(f"• {f}" for f in fonts) if fonts else "_empty_")
         await safe_edit(query.message, body, reply_markup=kb_font_menu(cfg))
         return
-
     if data == "font_add":
         awaiting_reply[user_id] = {"type": "font_upload"}
         await safe_edit(query.message, "📤 **Upload your font now** (.ttf or .otf).\nSend it as a document reply, or just send the file directly in chat.")
         return
-
     if data.startswith("fontsel_"):
         name = data.split("_", 1)[1]
         cfg["font_name"] = name
@@ -503,7 +479,6 @@ async def handle_callbacks(client, query: CallbackQuery):
             reply_markup=kb_font_menu(cfg)
         )
         return
-
     if data.startswith("fontdel_"):
         name = data.split("_", 1)[1]
         delete_font(name)
@@ -517,18 +492,15 @@ async def handle_callbacks(client, query: CallbackQuery):
         await safe_edit(query.message, body, reply_markup=kb_font_menu(cfg))
         return
 
-    # ---------- API / Provider Menu ----------
     if data == "menu_api":
         await safe_edit(query.message, 
             "⚙️ **Provider & API Configuration**",
             reply_markup=kb_api_menu(cfg)
         )
         return
-
     if data == "api_provider_open":
         await safe_edit(query.message, "⚙️ **Select Provider:**", reply_markup=kb_provider_select(cfg))
         return
-
     if data.startswith("provset_"):
         provider = data.split("_", 1)[1]
         cfg["provider"] = provider
@@ -536,25 +508,21 @@ async def handle_callbacks(client, query: CallbackQuery):
         await safe_answer(query, f"Provider set to {provider}")
         await safe_edit(query.message, "⚙️ **Provider & API Configuration**", reply_markup=kb_api_menu(cfg))
         return
-
     if data.startswith("api_field_"):
-        field = data.split("api_field_", 1)[1]  # api_url / api_key / model_name
+        field = data.split("api_field_", 1)[1]
         pretty = {"api_url": "Base URL", "api_key": "API Key", "model_name": "Model ID"}.get(field, field)
         awaiting_reply[user_id] = {"type": "api_field", "extra": {"field": field}}
         await safe_edit(query.message, f"✍️ **Reply to this message with the new {pretty}.**")
         return
 
-    # ---------- Prompt Library Menu ----------
     if data == "menu_prompt":
         await safe_edit(query.message, "📝 **Prompt Library**\nSystem prompt = model behaviour. User prompt = your custom focus.", reply_markup=kb_prompt_root())
         return
-
     if data == "prompt_open_system" or data == "prompt_open_user":
         kind = "system" if data.endswith("system") else "user"
         selected = cfg["system_prompt_name"] if kind == "system" else cfg["user_prompt_name"]
         await safe_edit(query.message, f"📝 **{kind.title()} Prompts**\nSelected: `{selected}`", reply_markup=kb_prompt_list(kind, cfg))
         return
-
     if data.startswith("promptsel_"):
         _, kind, name = data.split("_", 2)
         lib = load_prompt_library(kind)
@@ -569,12 +537,10 @@ async def handle_callbacks(client, query: CallbackQuery):
             await safe_answer(query, f"Selected: {name}")
         await safe_edit(query.message, f"📝 **{kind.title()} Prompts**\nSelected: `{name}`", reply_markup=kb_prompt_list(kind, cfg))
         return
-
     if data.startswith("promptdel_"):
         _, kind, name = data.split("_", 2)
         ok = delete_prompt(kind, name)
         if ok:
-            # if deleted prompt was selected, fall back to whatever remains first
             lib = load_prompt_library(kind)
             fallback_name = next(iter(lib))
             if kind == "system" and cfg["system_prompt_name"] == name:
@@ -590,18 +556,15 @@ async def handle_callbacks(client, query: CallbackQuery):
             await safe_answer(query, "Can't delete the last remaining prompt.", show_alert=True)
         await safe_edit(query.message, f"📝 **{kind.title()} Prompts**", reply_markup=kb_prompt_list(kind, cfg))
         return
-
     if data.startswith("prompt_add_"):
         kind = data.split("prompt_add_", 1)[1]
         awaiting_reply[user_id] = {"type": "prompt_name", "extra": {"kind": kind}}
         await safe_edit(query.message, f"✍️ **Reply to this message with a name for the new {kind} prompt.**")
         return
 
-    # ---------- Output Format Menu ----------
     if data == "menu_output":
         await safe_edit(query.message, f"📦 **Output Format**\nCurrent: `{cfg['output_format']}`", reply_markup=kb_output_menu(cfg))
         return
-
     if data.startswith("outset_"):
         code = data.split("_", 1)[1]
         cfg["output_format"] = code
@@ -610,7 +573,6 @@ async def handle_callbacks(client, query: CallbackQuery):
         await safe_edit(query.message, f"📦 **Output Format**\nCurrent: `{cfg['output_format']}`", reply_markup=kb_output_menu(cfg))
         return
 
-    # ---------- Upload Mode Selection (/translate flow) ----------
     if data.startswith("uploadmode_"):
         mode = data.split("_", 1)[1]
         pending_files[user_id] = {"mode": mode, "files": [], "collecting": True}
@@ -623,7 +585,6 @@ async def handle_callbacks(client, query: CallbackQuery):
         await safe_edit(query.message, f"📥 **Upload mode:** `{mode}`\n{hint}")
         return
 
-    # ---------- Job Pipeline Controls ----------
     if data == "start_pipeline":
         await safe_edit(query.message, "🔄 Initializing translation pipeline...")
         active_jobs[user_id] = {"cancel": False, "status_msg": query.message}
@@ -655,12 +616,10 @@ async def handle_callbacks(client, query: CallbackQuery):
         await send_partial_results(client, query.message, user_id)
         return
 
-# ================= File Ingestion During /translate Collection =================
+# ================= File Ingestion =================
 @app.on_message((filters.document | filters.photo) & auth_filter)
 async def receive_files(client, message: Message):
     user_id = message.from_user.id
-
-    # Case 1: user is uploading a font (triggered via Font Track > Add Font)
     pending_reply = awaiting_reply.get(user_id)
     if pending_reply and pending_reply["type"] == "font_upload" and message.document:
         doc_name = message.document.file_name or ""
@@ -677,7 +636,6 @@ async def receive_files(client, message: Message):
         await message.reply_text(f"✅ Font `{doc_name}` added to library and selected.", reply_markup=kb_font_menu(cfg))
         return
 
-    # Case 2: user is collecting files for a translation job
     queue = pending_files.get(user_id)
     if not queue or not queue.get("collecting"):
         await message.reply_text("ℹ️ Pehle `/translate` bhejo aur upload type select karo.")
@@ -697,7 +655,7 @@ async def receive_files(client, message: Message):
     queue["files"].append(message)
     await message.reply_text(f"✅ Queued ({len(queue['files'])} total). Aur bhejo ya `/end` bhejo.")
 
-# ================= Generic Reply Capture (settings inputs) =================
+# ================= Generic Reply Capture =================
 @app.on_message(filters.text & filters.reply & auth_filter)
 async def handle_reply_capture(client, message: Message):
     user_id = message.from_user.id
@@ -764,8 +722,6 @@ async def handle_reply_capture(client, message: Message):
             )
             return
 
-        # Accumulate this chunk and keep waiting — this also transparently handles the
-        # case where Telegram itself split one long paste into multiple messages.
         parts.append(text)
         total_len = sum(len(p) for p in parts)
         await message.reply_text(
@@ -775,8 +731,7 @@ async def handle_reply_capture(client, message: Message):
         return
 
 # ================= Job State for Pause/Resume =================
-paused_jobs = {}  # user_id -> {"translated_dir":..., "queue":[...], "current_index":..., "settings":..., "total_images":...}
-
+paused_jobs = {}
 BASE_STAGING = str(BASE_DIR / "workspace")
 
 def build_status_text(mode_label, stage, current_file_idx, total_files, current_image, total_images_in_file, percent):
@@ -795,12 +750,19 @@ def extract_archive(path, dest_dir):
     with zipfile.ZipFile(path, 'r') as zip_ref:
         zip_ref.extractall(dest_dir)
 
+# 🔥 FIX 2: PyMuPDF for smooth PDF extraction without hanging 🔥
 def extract_pdf(path, dest_dir):
-    # Uses pdf skill's underlying tooling (pdftoppm / PyMuPDF) - here we shell out to pdftoppm if available.
-    subprocess.run(["pdftoppm", "-png", "-r", "200", path, os.path.join(dest_dir, "page")], check=True)
+    doc = fitz.open(path)
+    for page_num in range(len(doc)):
+        page = doc.load_page(page_num)
+        pix = page.get_pixmap(dpi=200) 
+        output_path = os.path.join(dest_dir, f"page_{page_num+1:03d}.png")
+        pix.save(output_path)
+    doc.close()
 
+# 🔥 FIX 1: Stitch slices vertically & clean up duplicates 🔥
 def flatten_and_order(input_dir):
-    """Move nested images to root, sort naturally, rename to 001,002... ordering."""
+    # 1. Flattening
     for root, _, files in os.walk(input_dir, topdown=False):
         for f in files:
             if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
@@ -811,14 +773,55 @@ def flatten_and_order(input_dir):
             except Exception:
                 pass
 
+    # 2. Get images and group by base name
     images = sorted([f for f in os.listdir(input_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))])
+    groups = {}
+    for fname in images:
+        base_name = fname.split("__")[0] if "__" in fname else os.path.splitext(fname)[0]
+        if base_name not in groups:
+            groups[base_name] = []
+        groups[base_name].append(fname)
+    
+    # 3. Stitching & Renaming
     ordered_map = {}
-    for idx, fname in enumerate(images, start=1):
-        ext = os.path.splitext(fname)[1]
+    idx = 1
+    
+    for base_name in sorted(groups.keys()):
+        group_files = sorted(groups[base_name])
+        ext = os.path.splitext(group_files[0])[1]
         new_name = f"{idx:03d}{ext}"
-        if new_name != fname:
-            shutil.move(os.path.join(input_dir, fname), os.path.join(input_dir, new_name))
+        new_path = os.path.join(input_dir, new_name)
+        
+        if len(group_files) > 1:
+            try:
+                imgs = [Image.open(os.path.join(input_dir, f)) for f in group_files]
+                widths, heights = zip(*(i.size for i in imgs))
+                total_height = sum(heights)
+                max_width = max(widths)
+                
+                stitched_img = Image.new('RGB', (max_width, total_height))
+                y_offset = 0
+                for img in imgs:
+                    stitched_img.paste(img, (0, y_offset))
+                    y_offset += img.size[1]
+                    img.close()
+                
+                stitched_img.save(new_path)
+                
+                for f in group_files:
+                    old_file_path = os.path.join(input_dir, f)
+                    if old_file_path != new_path and os.path.exists(old_file_path):
+                        os.remove(old_file_path)
+            except Exception as e:
+                print(f"⚠️ Error stitching slices for {base_name}: {e}")
+        else:
+            old_path = os.path.join(input_dir, group_files[0])
+            if old_path != new_path:
+                shutil.move(old_path, new_path)
+        
         ordered_map[idx] = new_name
+        idx += 1
+        
     return ordered_map
 
 def build_dynamic_system_instruction(cfg):
@@ -860,20 +863,19 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
     os.makedirs(translated_dir, exist_ok=True)
     os.makedirs(font_dir_for_run, exist_ok=True)
 
-    # copy selected font into the run's font dir so main.py picks it up
     if cfg.get("font_name"):
         src_font = FONTS_DIR / cfg["font_name"]
         if src_font.exists():
             shutil.copy(src_font, font_dir_for_run)
 
     total_files = len(files)
-    all_translated_outputs = []  # list of (index, output_path) to send in order at the end
-    failure_reasons = []  # list of (file_idx, reason_text) for files that produced no output
+    all_translated_outputs = []  
+    failure_reasons = []  
     resume_from = paused_jobs.pop(user_id, {}).get("stopped_at_file") or 1
 
     for file_idx, source_message in enumerate(files, start=1):
         if file_idx < resume_from:
-            continue  # already completed & sent before pause
+            continue  
 
         job = active_jobs.get(user_id)
         if job and job["cancel"]:
@@ -886,9 +888,6 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
         await safe_edit(status_msg, build_status_text(mode_label, "📥 Downloading payload", file_idx, total_files, 0, 0, 5))
         downloaded_path = await source_message.download(file_name=os.path.join(job_root, f"src_{file_idx:03d}"))
 
-        # Renaming: pyrogram doesn't always preserve/add an extension, so fix it explicitly.
-        # - message.document: use its original filename's extension.
-        # - message.photo: Telegram compresses photos to JPEG, so force .jpg.
         if source_message.document and source_message.document.file_name:
             ext = os.path.splitext(source_message.document.file_name)[1] or ".jpg"
         elif source_message.photo:
@@ -901,7 +900,6 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             os.rename(downloaded_path, fixed_path)
             downloaded_path = fixed_path
 
-        # Extraction based on mode
         await safe_edit(status_msg, build_status_text(mode_label, "📂 Extracting", file_idx, total_files, 0, 0, 15))
         if mode == "archive" or downloaded_path.lower().endswith(('.zip', '.cbz')):
             extract_archive(downloaded_path, input_dir)
@@ -953,7 +951,6 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
 
-            # Poll loop so cancel is responsive while subprocess runs
             while process.returncode is None:
                 job = active_jobs.get(user_id)
                 if job and job["cancel"]:
@@ -974,7 +971,6 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             stdout_text = (stdout_bytes or b"").decode(errors="replace")
             stderr_text = (stderr_bytes or b"").decode(errors="replace")
 
-            # Always dump the engine's own logs to the runner console for full debugging.
             print("----- MangaTranslator stdout -----")
             print(stdout_text)
             print("----- MangaTranslator stderr -----")
@@ -995,9 +991,6 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
 
         await safe_edit(status_msg, build_status_text(mode_label, "📦 Packaging output", file_idx, total_files, total_images, total_images, 90))
 
-        # Verify the OCR/translation engine actually produced output before packaging.
-        # Without this check, an empty output folder silently becomes an empty zip
-        # that "successfully" sends, making it look like nothing happened.
         produced_files = []
         if os.path.exists(file_translated_dir):
             produced_files = [f for f in os.listdir(file_translated_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
@@ -1015,8 +1008,6 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
 
         try:
             if cfg['output_format'] == 'img':
-                # Raw Images mode: send each translated image as its own document,
-                # in order, instead of silently zipping them.
                 image_files = sorted(
                     [f for f in os.listdir(file_translated_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
                 )
@@ -1090,12 +1081,9 @@ def package_output(source_dir, job_root, file_idx, output_format):
         shutil.make_archive(archive_base, "zip", source_dir)
         return f"{archive_base}.zip"
     else:
-        # "img" (Raw Images) never reaches here - it's handled separately by sending
-        # each translated image individually. This fallback only covers unknown formats.
         shutil.make_archive(archive_base, "zip", source_dir)
         return f"{archive_base}.zip"
 
-# ================= Cancel / Pause Handling =================
 async def handle_job_cancelled(client, status_msg, user_id, translated_dir, file_idx=None, total_files=None, ordered_map=None):
     paused_jobs[user_id] = {
         "translated_dir": translated_dir,
@@ -1109,7 +1097,6 @@ async def handle_job_cancelled(client, status_msg, user_id, translated_dir, file
     )
 
 async def resume_manga_pipeline(client, status_msg, user_id):
-    # Re-invoke the same pipeline; already-completed files were sent, so re-run from remaining queue.
     await execute_manga_pipeline(client, status_msg, user_id)
 
 async def send_partial_results(client, status_msg, user_id):

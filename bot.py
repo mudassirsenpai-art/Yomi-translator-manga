@@ -1058,7 +1058,9 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             # the model emit BOTH strings ("English || Localized") in one
             # bubble. That bloated the token payload and triggered
             # "Text too large for bubble" render-overflow failures.
-            "--target-language", cfg['target_lang'],
+            # NOTE: MangaTranslator's actual CLI flag is `--output-language`,
+            # not `--target-language` (confirmed against upstream --help).
+            "--output-language", cfg['target_lang'],
             "--provider", cfg['provider'],
             "--openai-compatible-url", cfg['api_url'],
             "--openai-compatible-api-key", cfg['api_key'],

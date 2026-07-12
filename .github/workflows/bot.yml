@@ -1,0 +1,35 @@
+name: MangaTranslator Bot Service
+
+on:
+  workflow_dispatch: # Manual trigger from GitHub Actions tab
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Setup System Dependencies (FFmpeg, etc.)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 unzip zip ffmpeg
+
+      - name: Clone & Setup MangaTranslator Core
+        run: |
+          rm -rf MangaTranslator
+          git clone https://github.com/meangrinch/MangaTranslator.git
+          cd MangaTranslator
+          pip install -r requirements.txt
+          pip install Pillow openai pyrogram tgcrypto
+
+      - name: Run Telegram Bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          AUTHORIZED_USERS: ${{ secrets.AUTHORIZED_USERS }}
+        run: python bot.py

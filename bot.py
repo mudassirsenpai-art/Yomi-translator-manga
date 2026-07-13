@@ -2004,7 +2004,7 @@ async def _detect_bubble_boxes(image_path, cfg):
     if not await cli_supports_flag("--detect-only"):
         return None
 
-    cmd = ["python", "MangaTranslator/main.py", "--input", image_path, "--detect-only"]
+    cmd = ["python", "main.py", "--input", image_path, "--detect-only"]
 
     confidence = cfg.get("tile_detect_confidence") or cfg.get("confidence") or MANHWA_TILE_DETECT_CONFIDENCE
     cmd += ["--confidence", str(confidence)]
@@ -2248,7 +2248,7 @@ async def _get_main_help_text():
     if _cli_help_cache["text"] is None:
         try:
             proc = await asyncio.create_subprocess_exec(
-                "python", "MangaTranslator/main.py", "--help",
+                "python", "main.py", "--help",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
             try:
@@ -2459,7 +2459,7 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
         os.makedirs(file_translated_dir, exist_ok=True)
 
         cmd = [
-            "python", "MangaTranslator/main.py",
+            "python", "main.py",
             "--input", input_dir,
             "--output", file_translated_dir,
             "--batch",
@@ -2509,6 +2509,15 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
         )
 
         try:
+            # Run the engine at a lower OS scheduling priority (nice) than the
+            # bot process. On the 2-core GitHub Actions runner, the engine's
+            # PyTorch/YOLO inference is CPU-heavy enough to starve the bot's
+            # asyncio event loop of CPU time, which is why /settings button
+            # taps can appear to "hang" while a translation job is running.
+            # `nice -n 15` tells the kernel scheduler to prefer the bot
+            # process whenever both are runnable at the same time.
+            if shutil.which("nice"):
+                cmd = ["nice", "-n", "15"] + cmd
             process = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=subprocess_env
             )

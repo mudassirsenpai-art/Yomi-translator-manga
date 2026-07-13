@@ -6,7 +6,7 @@ on:
     branches: [main]
     paths:
       - "bot.py"
-      - ".github/workflows/manga-bot.yml"
+      - ".github/workflows/bot.yml"
   schedule:
     - cron: "0 */5 * * *"
 
@@ -29,7 +29,7 @@ jobs:
       - name: Setup System Dependencies
         run: |
           sudo apt-get update
-          # skia-python (used by MangaTranslator for text rendering) needs a full
+          # skia-python (used for text rendering) needs a full
           # graphics/EGL stack even on a headless runner - libgl1 alone is not enough.
           sudo apt-get install -y \
             libgl1 \
@@ -48,22 +48,17 @@ jobs:
             libxkbcommon0 \
             unzip zip ffmpeg
 
-      - name: Clone & Setup MangaTranslator Core
-        env:
-          DEPENDENCY_TOKEN: ${{ secrets.DEPENDENCY_TOKEN }}
+      - name: Setup Python Environment & Dependencies
         run: |
-          rm -rf MangaTranslator
-          # Authenticating the private repo clone using your token
-          git clone https://x-access-token:${DEPENDENCY_TOKEN}@github.com/mudassirsenpai-art/MangaTranslator.git
-          cd MangaTranslator
-          # PyTorch must be installed explicitly - it is NOT in requirements.txt
-          # Fixed the invalid version numbers (2.11.0 -> 2.1.0 and 0.26.0 -> 0.16.0)
+          # PyTorch must be installed explicitly
           pip install torch==2.1.0 torchvision==0.16.0 --extra-index-url https://download.pytorch.org/whl/cpu
-          pip install -r requirements.txt
-          # Pillow: image stitching / tiling / PDF packaging
-          # numpy: row-flatness analysis for safe-cut Manhwa tiling
-          # PyMuPDF: pure-Python PDF page extraction (replaces pdftoppm)
-          # openai, pyrogram, tgcrypto: bot runtime deps
+          
+          # Install requirements if the file exists in your repository
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          
+          # Install bot runtime dependencies
           pip install Pillow numpy openai pyrogram tgcrypto PyMuPDF
 
       - name: Verify Core Imports

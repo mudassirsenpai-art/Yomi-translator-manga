@@ -17,7 +17,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 AUTH_USERS_STR = os.environ.get("AUTHORIZED_USERS", "")
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
-    print("❌ Error: API_ID, API_HASH, ya BOT_TOKEN repository secrets mein missing hain!")
+    print("❌ Error: API_ID, API_HASH, or BOT_TOKEN missing from repository secrets!")
     sys.exit(1)
 
 AUTHORIZED_USERS = [int(u.strip()) for u in AUTH_USERS_STR.split(",") if u.strip().isdigit()]
@@ -25,7 +25,7 @@ AUTHORIZED_USERS = [int(u.strip()) for u in AUTH_USERS_STR.split(",") if u.strip
 app = Client("YomiTranslatorBot", bot_token=BOT_TOKEN, api_id=API_ID, api_hash=API_HASH)
 
 # ================= Persistent Storage Paths =================
-# Runner par ye repo ke andar rehte hain, taake font/prompt library commit hoke persist ho.
+# These stay inside the repo on the runner, so the font/prompt library gets committed and persists.
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "bot_data"
 FONTS_DIR = DATA_DIR / "fonts"
@@ -171,6 +171,28 @@ def default_config():
         # var / --osb setup described in the MangaTranslator README to
         # actually download the AnimeText_yolo model on first use.
         "osb_enabled": True,
+        # Appearance settings — all default to None, which means "let the
+        # MangaTranslator engine use its own built-in default", i.e. the
+        # original behaviour before this menu existed. Nothing is forced onto
+        # the engine unless the user explicitly picks a value here.
+        # NOTE: confirmed against the actual MangaTranslator main.py --help
+        # output. The engine has no --font-bold and no top-to-bottom-fill
+        # flag — those don't exist, so they aren't offered here. What DOES
+        # exist and is offered instead:
+        "min_font_size": None,      # int px, engine default 8   (--min-font-size)
+        "max_font_size": None,      # int px, engine default 16  (--max-font-size)
+        "auto_vertical_text": None, # True/False/None, stacks short text vertically in tall bubbles (--auto-vertical-text)
+        "line_spacing_mult": None,  # float, engine default 1.0  (--line-spacing-mult)
+        "subpixel_rendering": None, # True/False/None, engine default True (--no-subpixel-rendering flips it off)
+        "font_hinting": None,       # "none"/"slight"/"normal"/"full"/None, engine default "none" (--font-hinting)
+        "use_ligatures": None,      # True/False/None, engine default False (--use-ligatures turns it on)
+        "hyphenate_before_scaling": None,  # True/False/None, engine default True (--no-hyphenate-before-scaling flips it off)
+        "hyphen_penalty": None,     # float 100-2000, engine default 1000.0 (--hyphen-penalty)
+        "hyphenation_min_word_length": None,  # int 4-10, engine default 8 (--hyphenation-min-word-length)
+        "badness_exponent": None,   # float 2-4, engine default 3.0 (--badness-exponent)
+        "padding_pixels": None,     # float 2-12, engine default 5.0 (--padding-pixels)
+        "supersampling_factor": None,  # int 1-4, engine default 4 (--supersampling-factor)
+        "detach_trailing_punctuation": None,  # True/False/None, engine default True (--no-detach-trailing-punctuation flips it off)
         "system_prompt_name": DEFAULT_SYSTEM_PROMPT_NAME,
         "system_prompt_text": DEFAULT_SYSTEM_PROMPT_TEXT,
         "user_prompt_name": DEFAULT_USER_PROMPT_NAME,
@@ -309,6 +331,7 @@ def kb_main_menu():
         [InlineKeyboardButton("📚 Content Type", callback_data="menu_content_type")],
         [InlineKeyboardButton("🌐 Language Settings", callback_data="menu_lang")],
         [InlineKeyboardButton("🔡 Font Track", callback_data="menu_font")],
+        [InlineKeyboardButton("🎨 Appearance", callback_data="menu_appearance")],
         [InlineKeyboardButton("⚙️ Provider & API", callback_data="menu_api")],
         [InlineKeyboardButton("📝 Prompt Library", callback_data="menu_prompt")],
         [InlineKeyboardButton("📦 Output Format", callback_data="menu_output")],
@@ -357,6 +380,101 @@ def kb_font_menu(cfg):
         ])
     rows.append([InlineKeyboardButton("➕ Add Font", callback_data="font_add")])
     rows.append([InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")])
+    return InlineKeyboardMarkup(rows)
+
+def kb_appearance_menu(cfg):
+    rows = [
+        [InlineKeyboardButton("🔡 Font & Sizing", callback_data="menu_appear_font")],
+        [InlineKeyboardButton("📐 Layout & Quality", callback_data="menu_appear_layout")],
+        [InlineKeyboardButton("♻️ Reset All to Original/Default", callback_data="appear_reset_all")],
+        [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+def _appear_val_label(cfg, field, default_display):
+    v = cfg.get(field)
+    return f"Original/Default ({default_display})" if v is None else str(v)
+
+def kb_appear_font_menu(cfg):
+    min_fs = _appear_val_label(cfg, "min_font_size", "8")
+    max_fs = _appear_val_label(cfg, "max_font_size", "16")
+    ls_mult = _appear_val_label(cfg, "line_spacing_mult", "1.0")
+    hint = _appear_val_label(cfg, "font_hinting", "none")
+    lig = cfg.get("use_ligatures")
+    lig_label = "Original/Default (Off)" if lig is None else ("✅ On" if lig else "❌ Off")
+    avt = cfg.get("auto_vertical_text")
+    avt_label = "Original/Default (Off)" if avt is None else ("✅ On" if avt else "❌ Off")
+
+    rows = [
+        [InlineKeyboardButton(f"🔡 Min Font Size (px): {min_fs}", callback_data="appear_field_min_font_size")],
+        [InlineKeyboardButton(f"🔠 Max Font Size (px): {max_fs}", callback_data="appear_field_max_font_size")],
+        [InlineKeyboardButton(f"📏 Line Spacing: {ls_mult}", callback_data="appear_field_line_spacing_mult")],
+        [InlineKeyboardButton(f"🔎 Font Hinting: {hint}", callback_data="appear_hinting_open")],
+        [InlineKeyboardButton(f"🔗 Ligatures: {lig_label}", callback_data="appear_bool_use_ligatures")],
+        [InlineKeyboardButton(f"↕️ Auto-Vertical Text: {avt_label}", callback_data="appear_bool_auto_vertical_text")],
+        [InlineKeyboardButton("🔙 Back", callback_data="menu_appearance")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+def kb_appear_layout_menu(cfg):
+    padding = _appear_val_label(cfg, "padding_pixels", "5.0")
+    supersample = _appear_val_label(cfg, "supersampling_factor", "4")
+    badness = _appear_val_label(cfg, "badness_exponent", "3.0")
+    hyphen_pen = _appear_val_label(cfg, "hyphen_penalty", "1000.0")
+    hyphen_len = _appear_val_label(cfg, "hyphenation_min_word_length", "8")
+
+    subpx = cfg.get("subpixel_rendering")
+    subpx_label = "Original/Default (On)" if subpx is None else ("✅ On" if subpx else "❌ Off")
+    hyph_scale = cfg.get("hyphenate_before_scaling")
+    hyph_scale_label = "Original/Default (On)" if hyph_scale is None else ("✅ On" if hyph_scale else "❌ Off")
+    detach_punct = cfg.get("detach_trailing_punctuation")
+    detach_punct_label = "Original/Default (On)" if detach_punct is None else ("✅ On" if detach_punct else "❌ Off")
+
+    rows = [
+        [InlineKeyboardButton(f"📦 Bubble Padding (px): {padding}", callback_data="appear_field_padding_pixels")],
+        [InlineKeyboardButton(f"✨ Supersampling (1-4): {supersample}", callback_data="appear_field_supersampling_factor")],
+        [InlineKeyboardButton(f"📊 Line Badness Exponent: {badness}", callback_data="appear_field_badness_exponent")],
+        [InlineKeyboardButton(f"➖ Hyphen Penalty: {hyphen_pen}", callback_data="appear_field_hyphen_penalty")],
+        [InlineKeyboardButton(f"🔤 Hyphenation Min Word Length: {hyphen_len}", callback_data="appear_field_hyphenation_min_word_length")],
+        [InlineKeyboardButton(f"🖥 Subpixel Rendering: {subpx_label}", callback_data="appear_bool_subpixel_rendering")],
+        [InlineKeyboardButton(f"✂️ Hyphenate Before Scaling: {hyph_scale_label}", callback_data="appear_bool_hyphenate_before_scaling")],
+        [InlineKeyboardButton(f"❗ Detach Trailing Punctuation: {detach_punct_label}", callback_data="appear_bool_detach_trailing_punctuation")],
+        [InlineKeyboardButton("🔙 Back", callback_data="menu_appearance")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+# Generic On/Off/Default selector for any boolean appearance field.
+APPEAR_BOOL_LABELS = {
+    "use_ligatures": ("Ligatures", "menu_appear_font"),
+    "auto_vertical_text": ("Auto-Vertical Text", "menu_appear_font"),
+    "subpixel_rendering": ("Subpixel Rendering", "menu_appear_layout"),
+    "hyphenate_before_scaling": ("Hyphenate Before Scaling", "menu_appear_layout"),
+    "detach_trailing_punctuation": ("Detach Trailing Punctuation", "menu_appear_layout"),
+}
+
+def kb_appear_bool_select(cfg, field):
+    val = cfg.get(field)
+    def mark(v):
+        return "✅ " if val == v else ""
+    _, back_target = APPEAR_BOOL_LABELS.get(field, ("Setting", "menu_appearance"))
+    rows = [
+        [InlineKeyboardButton(f"{mark(True)}On", callback_data=f"appearboolset_{field}_on")],
+        [InlineKeyboardButton(f"{mark(False)}Off", callback_data=f"appearboolset_{field}_off")],
+        [InlineKeyboardButton(f"{'✅ ' if val is None else ''}Original/Default", callback_data=f"appearboolset_{field}_default")],
+        [InlineKeyboardButton("🔙 Back", callback_data=back_target)],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+FONT_HINTING_OPTIONS = ["none", "slight", "normal", "full"]
+
+def kb_font_hinting_select(cfg):
+    current = cfg.get("font_hinting")
+    rows = []
+    for opt in FONT_HINTING_OPTIONS:
+        mark = "✅ " if current == opt else ""
+        rows.append([InlineKeyboardButton(f"{mark}{opt}", callback_data=f"hintingset_{opt}")])
+    rows.append([InlineKeyboardButton(f"{'✅ ' if current is None else ''}Original/Default (none)", callback_data="hintingset_default")])
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data="menu_appear_font")])
     return InlineKeyboardMarkup(rows)
 
 def kb_api_menu(cfg):
@@ -439,7 +557,7 @@ async def settings_cmd(client, message: Message):
 async def translate_cmd(client, message: Message):
     user_id = message.from_user.id
     if user_id in active_jobs:
-        await message.reply_text("⚠️ Ek job already chal rahi hai. Pehle usse cancel ya complete karo.")
+        await message.reply_text("⚠️ A job is already running. Cancel or complete it first.")
         return
     pending_files[user_id] = {"mode": None, "files": [], "collecting": False}
     await message.reply_text(
@@ -452,11 +570,11 @@ async def end_cmd(client, message: Message):
     user_id = message.from_user.id
     queue = pending_files.get(user_id)
     if not queue or not queue.get("collecting"):
-        await message.reply_text("⚠️ Koi active upload session nahi hai. `/translate` se shuru karo.")
+        await message.reply_text("⚠️ No active upload session. Start with `/translate`.")
         return
     queue["collecting"] = False
     if not queue["files"]:
-        await message.reply_text("❌ Koi file receive nahi hui. `/translate` dobara try karo.")
+        await message.reply_text("❌ No files received. Try `/translate` again.")
         pending_files.pop(user_id, None)
         return
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Start Translation", callback_data="start_pipeline")]])
@@ -470,7 +588,7 @@ async def cancel_cmd(client, message: Message):
     user_id = message.from_user.id
     if user_id in active_jobs:
         active_jobs[user_id]["cancel"] = True
-        await message.reply_text("🛑 Cancellation requested. Job rukne wali hai...")
+        await message.reply_text("🛑 Cancellation requested. Job is stopping...")
     else:
         pending_files.pop(user_id, None)
         awaiting_reply.pop(user_id, None)
@@ -627,6 +745,101 @@ async def handle_callbacks(client, query: CallbackQuery):
         await safe_edit(query.message, body, reply_markup=kb_font_menu(cfg))
         return
 
+    # ---------- Appearance Menu ----------
+    if data == "menu_appearance":
+        await safe_edit(
+            query.message,
+            "🎨 **Appearance Settings**\n"
+            "Controls how translated text is rendered inside speech bubbles.\n"
+            "_\"Original/Default\" = untouched, exactly like before this menu existed._",
+            reply_markup=kb_appearance_menu(cfg)
+        )
+        return
+
+    if data == "menu_appear_font":
+        await safe_edit(
+            query.message,
+            "🔡 **Font & Sizing**",
+            reply_markup=kb_appear_font_menu(cfg)
+        )
+        return
+
+    if data == "menu_appear_layout":
+        await safe_edit(
+            query.message,
+            "📐 **Layout & Quality**",
+            reply_markup=kb_appear_layout_menu(cfg)
+        )
+        return
+
+    if data.startswith("appear_field_"):
+        field = data.split("appear_field_", 1)[1]
+        pretty = {
+            "min_font_size": "Min Font Size (px)",
+            "max_font_size": "Max Font Size (px)",
+            "line_spacing_mult": "Line Spacing Multiplier",
+            "padding_pixels": "Bubble Padding (px)",
+            "supersampling_factor": "Supersampling Factor (1-4)",
+            "badness_exponent": "Line Badness Exponent (2-4)",
+            "hyphen_penalty": "Hyphen Penalty (100-2000)",
+            "hyphenation_min_word_length": "Hyphenation Min Word Length (4-10)",
+        }.get(field, field)
+        int_fields = {"min_font_size", "max_font_size", "supersampling_factor", "hyphenation_min_word_length"}
+        hint = "a whole number, e.g. `14`" if field in int_fields else "a decimal, e.g. `1.2`"
+        awaiting_reply[user_id] = {"type": "appear_field", "extra": {"field": field}}
+        await safe_edit(
+            query.message,
+            f"✍️ **Reply to this message with the new {pretty}** ({hint}).\n"
+            f"Reply with `default` to reset to Original/Default."
+        )
+        return
+
+    if data == "appear_hinting_open":
+        await safe_edit(query.message, "🔎 **Font Hinting Mode:**", reply_markup=kb_font_hinting_select(cfg))
+        return
+
+    if data.startswith("hintingset_"):
+        choice = data.split("_", 1)[1]
+        cfg["font_hinting"] = None if choice == "default" else choice
+        await save_user_config(user_id)
+        await safe_answer(query, "Font Hinting updated")
+        await safe_edit(query.message, "🔎 **Font Hinting Mode:**", reply_markup=kb_font_hinting_select(cfg))
+        return
+
+    if data.startswith("appear_bool_"):
+        field = data.split("appear_bool_", 1)[1]
+        label, _ = APPEAR_BOOL_LABELS.get(field, (field, "menu_appearance"))
+        await safe_edit(query.message, f"⚙️ **{label}:**", reply_markup=kb_appear_bool_select(cfg, field))
+        return
+
+    if data.startswith("appearboolset_"):
+        # format: appearboolset_<field>_<on|off|default>
+        rest = data[len("appearboolset_"):]
+        field, choice = rest.rsplit("_", 1)
+        cfg[field] = None if choice == "default" else (choice == "on")
+        await save_user_config(user_id)
+        await safe_answer(query, "Updated")
+        label, _ = APPEAR_BOOL_LABELS.get(field, (field, "menu_appearance"))
+        await safe_edit(query.message, f"⚙️ **{label}:**", reply_markup=kb_appear_bool_select(cfg, field))
+        return
+
+    if data == "appear_reset_all":
+        for field in (
+            "min_font_size", "max_font_size", "auto_vertical_text", "line_spacing_mult",
+            "subpixel_rendering", "font_hinting", "use_ligatures", "hyphenate_before_scaling",
+            "hyphen_penalty", "hyphenation_min_word_length", "badness_exponent",
+            "padding_pixels", "supersampling_factor", "detach_trailing_punctuation",
+        ):
+            cfg[field] = None
+        await save_user_config(user_id)
+        await safe_answer(query, "Appearance reset to Original/Default")
+        await safe_edit(
+            query.message,
+            "🎨 **Appearance Settings**\nAll settings reset to Original/Default.",
+            reply_markup=kb_appearance_menu(cfg)
+        )
+        return
+
     # ---------- API / Provider Menu ----------
     if data == "menu_api":
         await safe_edit(query.message, 
@@ -720,7 +933,7 @@ async def handle_callbacks(client, query: CallbackQuery):
             f"✏️ **Editing `{name}` ({kind} prompt).**\n\n"
             f"Current text:\n```\n{preview}\n```\n\n"
             f"✍️ **Reply to this message with the new full text.** This will overwrite `{name}` in place.\n"
-            f"_Agar bada hai to multiple messages mein todkar reply karo, phir `/donedone` reply karo._"
+            f"_If it's too long, split it across multiple messages (each as a reply), then reply `/donedone`._"
         )
         return
 
@@ -751,10 +964,10 @@ async def handle_callbacks(client, query: CallbackQuery):
         pending_files[user_id] = {"mode": mode, "files": [], "collecting": True}
         mode_label = dict(UPLOAD_MODES).get(f"uploadmode_{mode}", mode)
         hint = {
-            "raw": "Ab apni saari images bhejo. Jab complete ho jaye, `/end` bhejo.",
-            "archive": "Ab apni ZIP ya CBZ file(s) bhejo. Multiple bhi bhej sakte ho. Jab complete ho jaye, `/end` bhejo.",
-            "pdf": "Ab apni PDF file(s) bhejo. Multiple bhi bhej sakte ho. Jab complete ho jaye, `/end` bhejo.",
-        }.get(mode, "Files bhejo, phir /end bhejo.")
+            "raw": "Now send all your images. Once done, send `/end`.",
+            "archive": "Now send your ZIP or CBZ file(s). You can send multiple. Once done, send `/end`.",
+            "pdf": "Now send your PDF file(s). You can send multiple. Once done, send `/end`.",
+        }.get(mode, "Send your files, then send /end.")
         await safe_edit(query.message, f"📥 **Upload mode:** `{mode}`\n{hint}")
         return
 
@@ -800,7 +1013,7 @@ async def receive_files(client, message: Message):
     if pending_reply and pending_reply["type"] == "font_upload" and message.document:
         doc_name = message.document.file_name or ""
         if not doc_name.lower().endswith((".ttf", ".otf")):
-            await message.reply_text("❌ Sirf .ttf ya .otf files allowed hain.")
+            await message.reply_text("❌ Only .ttf or .otf files are allowed.")
             return
         dest = FONTS_DIR / doc_name
         await message.download(file_name=str(dest))
@@ -815,22 +1028,22 @@ async def receive_files(client, message: Message):
     # Case 2: user is collecting files for a translation job
     queue = pending_files.get(user_id)
     if not queue or not queue.get("collecting"):
-        await message.reply_text("ℹ️ Pehle `/translate` bhejo aur upload type select karo.")
+        await message.reply_text("ℹ️ Send `/translate` first and select an upload type.")
         return
 
     mode = queue["mode"]
     if mode == "raw" and not message.photo and not (message.document and (message.document.mime_type or "").startswith("image/")):
-        await message.reply_text("❌ Is mode mein sirf images allowed hain.")
+        await message.reply_text("❌ Only images are allowed in this mode.")
         return
     if mode == "archive" and not (message.document and message.document.file_name and message.document.file_name.lower().endswith((".zip", ".cbz"))):
-        await message.reply_text("❌ Is mode mein sirf ZIP/CBZ files allowed hain.")
+        await message.reply_text("❌ Only ZIP/CBZ files are allowed in this mode.")
         return
     if mode == "pdf" and not (message.document and message.document.file_name and message.document.file_name.lower().endswith(".pdf")):
-        await message.reply_text("❌ Is mode mein sirf PDF files allowed hain.")
+        await message.reply_text("❌ Only PDF files are allowed in this mode.")
         return
 
     queue["files"].append(message)
-    await message.reply_text(f"✅ Queued ({len(queue['files'])} total). Aur bhejo ya `/end` bhejo.")
+    await message.reply_text(f"✅ Queued ({len(queue['files'])} total). Send more, or send `/end`.")
 
 # ================= Generic Reply Capture (settings inputs) =================
 @app.on_message(filters.text & filters.reply & auth_filter)
@@ -861,16 +1074,82 @@ async def handle_reply_capture(client, message: Message):
         await message.reply_text(f"✅ {pretty} updated.", reply_markup=kb_api_menu(cfg))
         return
 
+    if kind == "appear_field":
+        field = pending_reply["extra"]["field"]
+        pretty = {
+            "min_font_size": "Min Font Size (px)",
+            "max_font_size": "Max Font Size (px)",
+            "line_spacing_mult": "Line Spacing Multiplier",
+            "padding_pixels": "Bubble Padding (px)",
+            "supersampling_factor": "Supersampling Factor",
+            "badness_exponent": "Line Badness Exponent",
+            "hyphen_penalty": "Hyphen Penalty",
+            "hyphenation_min_word_length": "Hyphenation Min Word Length",
+        }.get(field, field)
+        # Which submenu to return the confirmation keyboard to.
+        font_fields = {"min_font_size", "max_font_size", "line_spacing_mult"}
+        back_kb = kb_appear_font_menu(cfg) if field in font_fields else kb_appear_layout_menu(cfg)
+
+        if text.lower() == "default":
+            cfg[field] = None
+            await save_user_config(user_id)
+            awaiting_reply.pop(user_id, None)
+            await message.reply_text(f"✅ {pretty} reset to Original/Default.", reply_markup=back_kb)
+            return
+
+        int_fields = {"min_font_size", "max_font_size", "supersampling_factor", "hyphenation_min_word_length"}
+        is_int_field = field in int_fields
+        try:
+            value = int(text) if is_int_field else float(text)
+            if value <= 0:
+                raise ValueError
+        except ValueError:
+            hint = "a positive whole number (e.g. `14`)" if is_int_field else "a positive decimal (e.g. `1.2`)"
+            await message.reply_text(f"❌ Please reply with {hint}, or `default` to reset. Try again.")
+            return
+
+        # Range checks based on the engine's documented valid ranges.
+        range_checks = {
+            "supersampling_factor": (1, 4),
+            "badness_exponent": (2, 4),
+            "hyphen_penalty": (100, 2000),
+            "hyphenation_min_word_length": (4, 10),
+            "padding_pixels": (2, 12),
+        }
+        if field in range_checks:
+            lo, hi = range_checks[field]
+            if not (lo <= value <= hi):
+                await message.reply_text(f"❌ {pretty} should be between {lo} and {hi}. Try again.")
+                return
+
+        # Sanity check: min shouldn't exceed max and vice versa, if both are set.
+        if field in ("min_font_size", "max_font_size"):
+            other_field = "max_font_size" if field == "min_font_size" else "min_font_size"
+            other_value = cfg.get(other_field)
+            if other_value is not None:
+                if field == "min_font_size" and value > other_value:
+                    await message.reply_text(f"❌ Min Font Size ({value}) can't be greater than Max Font Size ({other_value}). Try again.")
+                    return
+                if field == "max_font_size" and value < other_value:
+                    await message.reply_text(f"❌ Max Font Size ({value}) can't be less than Min Font Size ({other_value}). Try again.")
+                    return
+
+        cfg[field] = value
+        await save_user_config(user_id)
+        awaiting_reply.pop(user_id, None)
+        await message.reply_text(f"✅ {pretty} set to `{value}`.", reply_markup=back_kb)
+        return
+
     if kind == "prompt_name":
         prompt_kind = pending_reply["extra"]["kind"]
         if len(text) > PROMPT_NAME_MAX_LEN:
-            await message.reply_text(f"❌ Naam {PROMPT_NAME_MAX_LEN} characters se zyada nahi ho sakta (`{len(text)}` diya). Dobara reply karo.")
+            await message.reply_text(f"❌ Name can't be more than {PROMPT_NAME_MAX_LEN} characters (got `{len(text)}`). Please reply again.")
             return
         awaiting_reply[user_id] = {"type": "prompt_body", "extra": {"kind": prompt_kind, "name": text, "parts": []}}
         await message.reply_text(
             f"✍️ **Reply to this message with the {prompt_kind} prompt text for** `{text}`.\n\n"
-            f"_Agar prompt Telegram ki 4096 character limit se bada hai, usse multiple messages mein todkar "
-            f"reply karo (har hissa isi message ko reply karke bhejo). Jab sab bhej do, `/donedone` reply karo._"
+            f"_If the prompt is longer than Telegram's 4096 character limit, split it across multiple messages "
+            f"(reply each part to this same message). Once you've sent it all, reply `/donedone`._"
         )
         return
 
@@ -881,7 +1160,7 @@ async def handle_reply_capture(client, message: Message):
 
         if text.strip() == "/donedone":
             if not parts:
-                await message.reply_text("❌ Koi prompt text abhi tak nahi mila. Pehle text reply karo, phir `/donedone`.")
+                await message.reply_text("❌ No prompt text received yet. Send the text first, then `/donedone`.")
                 return
             full_text = "".join(parts)
             is_editing = pending_reply["extra"].get("editing", False)
@@ -907,7 +1186,7 @@ async def handle_reply_capture(client, message: Message):
         total_len = sum(len(p) for p in parts)
         await message.reply_text(
             f"➕ Part {len(parts)} received ({len(text)} chars, total so far: {total_len}).\n"
-            f"Aur bhejo, ya `/donedone` reply karke save karo."
+            f"Send more, or reply `/donedone` to save."
         )
         return
 
@@ -1515,6 +1794,46 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             if cli_supports_flag("--osb-font-dir"):
                 cmd += ["--osb-font-dir", font_dir_for_run]
 
+        # Appearance overrides - all optional. If the user never touched the
+        # Appearance menu, every one of these stays None and nothing is added
+        # to cmd, so behaviour is byte-for-byte identical to before this
+        # feature existed ("Original/Default"). Flag names below are verified
+        # directly against MangaTranslator/main.py's argparse definitions.
+        # Still guarded with cli_supports_flag() in case a different
+        # fork/version is installed without them.
+        if cfg.get("min_font_size") is not None and cli_supports_flag("--min-font-size"):
+            cmd += ["--min-font-size", str(cfg["min_font_size"])]
+        if cfg.get("max_font_size") is not None and cli_supports_flag("--max-font-size"):
+            cmd += ["--max-font-size", str(cfg["max_font_size"])]
+        if cfg.get("auto_vertical_text") and cli_supports_flag("--auto-vertical-text"):
+            cmd.append("--auto-vertical-text")
+        if cfg.get("line_spacing_mult") is not None and cli_supports_flag("--line-spacing-mult"):
+            cmd += ["--line-spacing-mult", str(cfg["line_spacing_mult"])]
+        # subpixel_rendering defaults to True in the engine; only pass the flag
+        # to turn it OFF (there's no "--subpixel-rendering-on" flag to set).
+        if cfg.get("subpixel_rendering") is False and cli_supports_flag("--no-subpixel-rendering"):
+            cmd.append("--no-subpixel-rendering")
+        if cfg.get("font_hinting") is not None and cli_supports_flag("--font-hinting"):
+            cmd += ["--font-hinting", cfg["font_hinting"]]
+        if cfg.get("use_ligatures") and cli_supports_flag("--use-ligatures"):
+            cmd.append("--use-ligatures")
+        # hyphenate_before_scaling defaults to True; only pass the flag to turn it OFF.
+        if cfg.get("hyphenate_before_scaling") is False and cli_supports_flag("--no-hyphenate-before-scaling"):
+            cmd.append("--no-hyphenate-before-scaling")
+        if cfg.get("hyphen_penalty") is not None and cli_supports_flag("--hyphen-penalty"):
+            cmd += ["--hyphen-penalty", str(cfg["hyphen_penalty"])]
+        if cfg.get("hyphenation_min_word_length") is not None and cli_supports_flag("--hyphenation-min-word-length"):
+            cmd += ["--hyphenation-min-word-length", str(cfg["hyphenation_min_word_length"])]
+        if cfg.get("badness_exponent") is not None and cli_supports_flag("--badness-exponent"):
+            cmd += ["--badness-exponent", str(cfg["badness_exponent"])]
+        if cfg.get("padding_pixels") is not None and cli_supports_flag("--padding-pixels"):
+            cmd += ["--padding-pixels", str(cfg["padding_pixels"])]
+        if cfg.get("supersampling_factor") is not None and cli_supports_flag("--supersampling-factor"):
+            cmd += ["--supersampling-factor", str(cfg["supersampling_factor"])]
+        # detach_trailing_punctuation defaults to True; only pass the flag to turn it OFF.
+        if cfg.get("detach_trailing_punctuation") is False and cli_supports_flag("--no-detach-trailing-punctuation"):
+            cmd.append("--no-detach-trailing-punctuation")
+
         await safe_edit(status_msg, 
             build_status_text(mode_label, "🧠 OCR + Translation running", file_idx, total_files, 0, total_images, 40),
             reply_markup=kb_cancel_only()
@@ -1627,20 +1946,26 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
 
         try:
             if cfg['output_format'] == 'img':
-                # Raw Images mode: send each translated image as its own document,
-                # in order, instead of silently zipping them.
+                # Raw Images mode: all translated raw pages for this file go
+                # into ONE zip, in order, instead of being sent as separate
+                # scattered documents. This keeps "Raw Images" output as a
+                # single downloadable package rather than a flood of files.
                 image_files = sorted(
                     [f for f in os.listdir(file_translated_dir) if f.lower().endswith(IMAGE_EXTS)]
                 )
-                for img_idx, img_name in enumerate(image_files, start=1):
-                    send_kwargs = {
-                        "chat_id": source_message.chat.id,
-                        "document": os.path.join(file_translated_dir, img_name),
-                    }
-                    if img_idx == 1:
-                        send_kwargs["caption"] = f"💥 **File {file_idx}/{total_files} — image {img_idx}/{len(image_files)}**"
-                    await client.send_document(**send_kwargs)
-                all_translated_outputs.append((file_idx, file_translated_dir))
+                archive_base = os.path.join(job_root, f"raw_images_{file_idx:03d}")
+                shutil.make_archive(archive_base, "zip", file_translated_dir)
+                raw_zip_path = f"{archive_base}.zip"
+                await client.send_document(
+                    source_message.chat.id,
+                    document=raw_zip_path,
+                    caption=(
+                        f"💥 **File {file_idx}/{total_files} done!**\n"
+                        f"📦 Format: `Raw Images (.ZIP)`\n"
+                        f"🖼 Frames: `{len(image_files)}`"
+                    )
+                )
+                all_translated_outputs.append((file_idx, raw_zip_path))
             else:
                 output_path = package_output(file_translated_dir, job_root, file_idx, cfg['output_format'])
                 all_translated_outputs.append((file_idx, output_path))

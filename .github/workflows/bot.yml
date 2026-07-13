@@ -6,7 +6,7 @@ on:
     branches: [main]
     paths:
       - "bot.py"
-      - ".github/workflows/bot.yml"
+      - ".github/workflows/manga-bot.yml"
   schedule:
     - cron: "0 */5 * * *"
 
@@ -18,39 +18,8 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Bot Repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
-
-      # bot.py lives in this (bot) repo, but the actual translation engine
-      # (main.py, core/, utils/, models/, fonts/) lives in the
-      # Yomi-MangaTranslator repo. actions/checkout only pulls in the repo
-      # the workflow belongs to, so without this step main.py never exists
-      # on the runner at all - that's the real cause of the
-      # "can't open file .../main.py: No such file or directory" error,
-      # not a path typo in bot.py.
-      - name: Checkout Translation Engine Repository
-        uses: actions/checkout@v4
-        with:
-          repository: mudassirsenpai-art/Yomi-MangaTranslator
-          path: engine
-
-      # Copy the engine's files into the job's working directory (root),
-      # next to bot.py, so "python main.py" (as called from bot.py) resolves
-      # correctly without changing any paths inside bot.py itself.
-      # -n (no-clobber) so files already in the bot repo (e.g. bot.py's own
-      # requirements.txt, if any) are never overwritten by the engine's copy.
-      - name: Merge Engine Files Into Workspace
-        run: |
-          cp -rn engine/. .
-          rm -rf engine
-
-      - name: Verify Engine Checkout
-        run: |
-          if [ ! -f main.py ]; then
-            echo "::error::main.py not found after merging engine repo - checkout of Yomi-MangaTranslator likely failed or repo name/branch is wrong."
-            exit 1
-          fi
-          echo "Engine present: $(ls main.py core 2>/dev/null)"
 
       - name: Set up Python 3.10
         uses: actions/setup-python@v4
@@ -60,10 +29,9 @@ jobs:
       - name: Setup System Dependencies
         run: |
           sudo apt-get update
-          # skia-python (used for text rendering) needs a full
+          # skia-python (used by MangaTranslator for text rendering) needs a full
           # graphics/EGL stack even on a headless runner - libgl1 alone is not enough.
-          # --no-install-recommends avoids pulling in hundreds of extra packages.
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get install -y \
             libgl1 \
             libegl1 \
             libgles2 \
@@ -78,23 +46,21 @@ jobs:
             libxdamage1 \
             libxcomposite1 \
             libxkbcommon0 \
-            unzip zip
+            unzip zip ffmpeg
 
-          # ffmpeg is split out and installed without recommends too -
-          # otherwise it drags in the full mesa/va-driver/codec stack (200+ packages).
-          sudo apt-get install -y --no-install-recommends ffmpeg
-
-      - name: Setup Python Environment & Dependencies
+      - name: Clone & Setup MangaTranslator Core
         run: |
-          # PyTorch must be installed explicitly
-          pip install torch==2.1.0 torchvision==0.16.0 --extra-index-url https://download.pytorch.org/whl/cpu
-
-          # Install requirements if the file exists in your repository
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          fi
-
-          # Install bot runtime dependencies
+          rm -rf MangaTranslator
+          git clone https://github.com/meangrinch/MangaTranslator.git
+          cd MangaTranslator
+          # PyTorch must be installed explicitly - it is NOT in requirements.txt
+          # because it's hardware-specific (CPU/CUDA/ROCm/MPS).
+          pip install torch==2.11.0 torchvision==0.26.0 --extra-index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+          # Pillow: image stitching / tiling / PDF packaging
+          # numpy: row-flatness analysis for safe-cut Manhwa tiling
+          # PyMuPDF: pure-Python PDF page extraction (replaces pdftoppm)
+          # openai, pyrogram, tgcrypto: bot runtime deps
           pip install Pillow numpy openai pyrogram tgcrypto PyMuPDF
 
       - name: Verify Core Imports
@@ -109,7 +75,8 @@ jobs:
           AUTHORIZED_USERS: ${{ secrets.AUTHORIZED_USERS }}
           # Needed for OSB (Outside Speech Bubble) model download from HF Hub.
           # Without this, the download is unauthenticated and can hit HF's
-          # anonymous rate limit on GitHub's shared runner IPs.
+          # anonymous rate limit on GitHub's shared runner IPs, which is what
+          # was surfacing as the earlier "unauthenticated requests" warning.
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python bot.py

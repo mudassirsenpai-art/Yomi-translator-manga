@@ -96,24 +96,28 @@ CONTENT_TYPES = [
 # row within +/- MANHWA_TILE_SEARCH_RADIUS px, so a cut never lands in the
 # middle of a speech bubble or dense artwork. See tile_tall_pages().
 MANHWA_TILE_HEIGHT = 1600
-# Widened from 350 - gives the safe-cut search more room to find a row that
-# is genuinely blank rather than settling for the least-bad row nearby.
-MANHWA_TILE_OVERLAP = 450  # reused as the safe-cut search radius (+/- px)
+# Search radius for a safe cut row around the target line. Widened further so
+# the search has a much better chance of finding genuinely blank background
+# instead of running out of room and falling through to the extend/force path.
+MANHWA_TILE_OVERLAP = 700  # reused as the safe-cut search radius (+/- px)
 # Only kick in tiling once a stitched page exceeds this height - short
 # Manhwa pages behave fine as a single image and tiling would just add
 # unnecessary subprocess calls.
 MANHWA_TILE_TRIGGER_HEIGHT = 2200
-# A row must be this flat (low std-dev) to count as a safe cut line. Lower
-# than the previous implicit 6.0 default - stricter means a cut is only ever
-# accepted on rows that are truly blank background, not just low-contrast
-# art, which is what let cuts land close enough to bubble edges to produce
-# duplicated text after recomposition.
+# A row must be this flat (low std-dev) to count as a safe cut line. Kept
+# strict - a cut is only ever accepted on rows that are truly blank
+# background, not just low-contrast art, which is what let cuts land close
+# enough to bubble/art edges to visibly slice through them.
 MANHWA_SAFE_CUT_FLAT_THRESHOLD = 3.5
-# If no row in the search window clears the flatness threshold, the page is
-# considered to have no safe cut near the target line. Rather than falling
-# back to "least bad" (which is what produced duplicates before), the page
-# is tiled at a taller height instead - see _find_safe_cut_row.
-MANHWA_MAX_TILE_HEIGHT = 2600  # hard ceiling before we give up extending
+# If no row in the search window clears the flatness threshold, the tile
+# target is pushed further down in MANHWA_TILE_OVERLAP-sized steps and the
+# search runs again - see _find_safe_cut_row / tile_tall_pages. There is
+# intentionally NO hard ceiling on how far this can extend: a tile that ends
+# up taller than planned is always safer than a forced cut through the
+# middle of artwork or a speech bubble. In the extreme case where a page has
+# no confirmed-safe row anywhere below the current position, the tile simply
+# extends all the way to the bottom of the page (i.e. tiling silently no-ops
+# for that page and it gets translated as one piece) rather than guessing.
 
 DEFAULT_SYSTEM_PROMPT_NAME = "Default Localization Engine"
 DEFAULT_SYSTEM_PROMPT_TEXT = (
@@ -1423,7 +1427,7 @@ def tile_tall_pages(input_dir, ordered_map):
 
             tile_files = []
             tile_heights = []
-            forced_cut_rows = []  # rows where we hit MANHWA_MAX_TILE_HEIGHT without a confirmed-safe row
+            forced_cut_rows = []  # kept for compatibility with recompose_tiled_page's seam-duplicate check; always stays empty now
             y = 0
             tile_n = 0
             while y < height:
@@ -1432,24 +1436,19 @@ def tile_tall_pages(input_dir, ordered_map):
                     cut = height
                 else:
                     cut = _find_safe_cut_row(row_flatness, target_bottom, search_window, y + 1, height - 1)
-                    # No confirmed-safe row near the target - extend the tile
-                    # taller in fixed steps and try again, rather than forcing
-                    # a cut on a row that failed the flatness check. This is
-                    # the change that removes the "least bad row" fallback
-                    # that previously let duplicate-prone cuts through.
+                    # No confirmed-safe row near the target - keep pushing the
+                    # search target further down in MANHWA_TILE_OVERLAP-sized
+                    # steps and searching again. There is no ceiling on this:
+                    # a taller-than-planned tile is always safer than a cut
+                    # that lands inside artwork or a speech bubble, so in the
+                    # worst case this simply walks all the way to the bottom
+                    # of the page and the "tile" ends up being the whole
+                    # remaining page (equivalent to tiling not applying here).
                     extended_target = target_bottom
                     while cut is None and extended_target < height:
                         extended_target = min(extended_target + MANHWA_TILE_OVERLAP, height)
                         if extended_target >= height:
                             cut = height
-                            break
-                        if extended_target - y >= MANHWA_MAX_TILE_HEIGHT:
-                            # Hit the hard ceiling with no safe row found anywhere
-                            # in range. Record this so the page can be flagged
-                            # rather than silently shipped if it later shows
-                            # signs of a duplicate at this seam.
-                            cut = extended_target
-                            forced_cut_rows.append(cut)
                             break
                         cut = _find_safe_cut_row(row_flatness, extended_target, search_window, y + 1, height - 1)
 

@@ -62,14 +62,6 @@ CONTENT_TYPES = [
     ("💬 Comic (Western)", "comic"), ("📝 Novel (text only)", "novel"),
 ]
 
-# Tuned to cut far less often than before: most bubble/panel detectors handle
-# tiles up to ~3000-3500px fine, so there's no need to slice a 9000px strip into
-# 6 pieces. Fewer tiles = fewer seams = fewer chances of duplicated/misaligned art.
-MANHWA_TILE_HEIGHT = 3200
-MANHWA_TILE_OVERLAP = 400
-MANHWA_TILE_TRIGGER_HEIGHT = 3800
-MANHWA_SAFE_CUT_FLAT_THRESHOLD = 3.5
-
 DEFAULT_SYSTEM_PROMPT_NAME = "Default Localization Engine"
 DEFAULT_SYSTEM_PROMPT_TEXT = (
     "You are a professional multi-language manga and comic localization engine.\n"
@@ -124,11 +116,7 @@ def default_config():
         "user_prompt_name": DEFAULT_USER_PROMPT_NAME,
         "user_prompt_text": DEFAULT_USER_PROMPT_TEXT,
 
-        # Tiling Settings
-        "tile_enabled": None, "tile_height": None, "tile_search_radius": None, 
-        "tile_trigger_height": None, "tile_flat_threshold": None, "tile_seam_band_px": None, 
-        "tile_seam_diff_threshold": None,
-
+        
         # UI Modifiable Flags (Appearance, Detect)
         "min_font_size": None, "max_font_size": None, "auto_vertical_text": None,
         "line_spacing_mult": None, "subpixel_rendering": None, "font_hinting": None,
@@ -280,8 +268,6 @@ def kb_main_menu(cfg=None):
     ]
     if cfg is not None and cfg.get("content_type") != "novel":
         rows.append([InlineKeyboardButton("🎯 Detection Settings", callback_data="menu_detection")])
-    if cfg is not None and cfg.get("content_type") == "manhwa":
-        rows.append([InlineKeyboardButton("✂️ Tiling Settings", callback_data="menu_tiling")])
     rows += [
         [InlineKeyboardButton("🧠 Generation Settings", callback_data="xf_group_generation")],
         [InlineKeyboardButton("🧹 Cleaning & Upscaling", callback_data="xf_group_cleaning")],
@@ -714,45 +700,6 @@ def kb_ocr_method_select(cfg):
     rows.append([InlineKeyboardButton("🔙 Back", callback_data="menu_detection")])
     return InlineKeyboardMarkup(rows)
 
-# ================= Tiling Settings Keyboards (Manhwa) =================
-def _tile_val_label(cfg, field, default_display):
-    v = cfg.get(field)
-    return f"Original/Default ({default_display})" if v is None else str(v)
-
-def kb_tiling_menu(cfg):
-    enabled = cfg.get("tile_enabled")
-    enabled_label = "Original/Default (On)" if enabled is None else ("✅ On" if enabled else "❌ Off")
-    height = _tile_val_label(cfg, "tile_height", str(MANHWA_TILE_HEIGHT))
-    radius = _tile_val_label(cfg, "tile_search_radius", str(MANHWA_TILE_OVERLAP))
-    trigger = _tile_val_label(cfg, "tile_trigger_height", str(MANHWA_TILE_TRIGGER_HEIGHT))
-    flat = _tile_val_label(cfg, "tile_flat_threshold", str(MANHWA_SAFE_CUT_FLAT_THRESHOLD))
-    band = _tile_val_label(cfg, "tile_seam_band_px", str(SEAM_CHECK_BAND_PX))
-    diff = _tile_val_label(cfg, "tile_seam_diff_threshold", str(SEAM_DUPLICATE_DIFF_THRESHOLD))
-
-    rows = [
-        [InlineKeyboardButton(f"✂️ Tiling: {enabled_label}", callback_data="tile_bool_tile_enabled")],
-        [InlineKeyboardButton(f"📏 Trigger Height (px): {trigger}", callback_data="tile_field_tile_trigger_height")],
-        [InlineKeyboardButton(f"📐 Tile Height (px): {height}", callback_data="tile_field_tile_height")],
-        [InlineKeyboardButton(f"🔍 Safe-Cut Search Radius (px): {radius}", callback_data="tile_field_tile_search_radius")],
-        [InlineKeyboardButton(f"⬜ Flatness Threshold: {flat}", callback_data="tile_field_tile_flat_threshold")],
-        [InlineKeyboardButton(f"📊 Seam Check Band (px): {band}", callback_data="tile_field_tile_seam_band_px")],
-        [InlineKeyboardButton(f"🎯 Seam Duplicate Diff Threshold: {diff}", callback_data="tile_field_tile_seam_diff_threshold")],
-        [InlineKeyboardButton("♻️ Reset All to Original/Default", callback_data="tile_reset_all")],
-        [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")],
-    ]
-    return InlineKeyboardMarkup(rows)
-
-def kb_tile_bool_select(cfg, field):
-    val = cfg.get(field)
-    def mark(v): return "✅ " if val == v else ""
-    rows = [
-        [InlineKeyboardButton(f"{mark(True)}On", callback_data=f"tileboolset_{field}_on")],
-        [InlineKeyboardButton(f"{mark(False)}Off", callback_data=f"tileboolset_{field}_off")],
-        [InlineKeyboardButton(f"{'✅ ' if val is None else ''}Original/Default", callback_data=f"tileboolset_{field}_default")],
-        [InlineKeyboardButton("🔙 Back", callback_data="menu_tiling")],
-    ]
-    return InlineKeyboardMarkup(rows)
-
 def kb_api_menu(cfg):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"Provider: {cfg['provider']}", callback_data="api_provider_open")],
@@ -910,9 +857,8 @@ async def handle_callbacks(client, query: CallbackQuery):
         await safe_edit(
             query.message,
             f"📚 **Content Type**\nCurrent: `{cfg.get('content_type_label', 'Manhwa')}`\n\n"
-            f"🍥 **Manhwa**: long vertical-scroll strips. Tall stitched pages "
-            f"are automatically tiled before detection so bubbles don't get "
-            f"crushed into invisibility.\n"
+            f"🍥 **Manhwa**: long vertical-scroll strips, processed as whole "
+            f"pages.\n"
             f"📖 **Manga**: normal single manga pages, right-to-left panels.\n"
             f"💬 **Comic**: Western-style single-page comics.\n"
             f"📝 **Novel**: text-only prose, no bubbles/panels - skips the "
@@ -1388,79 +1334,11 @@ async def handle_callbacks(client, query: CallbackQuery):
         return
 
 
-    if data == "menu_tiling":
-        await safe_edit(
-            query.message,
-            "✂️ **Tiling Settings (Manhwa)**\n"
-            "Controls how tall, stitched long-strip pages get sliced into "
-            "detector-sized windows before bubble detection, so art doesn't "
-            "get crushed down and bubbles don't vanish.\n\n"
-            "• **Trigger Height**: pages taller than this get tiled at all.\n"
-            "• **Tile Height**: target height per tile.\n"
-            "• **Safe-Cut Search Radius**: how far to search for a blank row "
-            "near the target cut line, so a cut never lands mid-bubble.\n"
-            "• **Flatness Threshold**: how blank a row must be to count as "
-            "a safe cut.\n"
-            "• **Seam Check Band / Diff Threshold**: how the final duplicate-"
-            "text check compares pixels just above/below a seam.\n\n"
-            "_\"Original/Default\" = untouched, exactly like before this menu existed._",
-            reply_markup=kb_tiling_menu(cfg)
-        )
-        return
-
-    if data.startswith("tile_field_"):
-        field = data.split("tile_field_", 1)[1]
-        pretty = {
-            "tile_height": "Tile Height (px)",
-            "tile_search_radius": "Safe-Cut Search Radius (px)",
-            "tile_trigger_height": "Trigger Height (px)",
-            "tile_flat_threshold": "Flatness Threshold",
-            "tile_seam_band_px": "Seam Check Band (px)",
-            "tile_seam_diff_threshold": "Seam Duplicate Diff Threshold",
-        }.get(field, field)
-        int_fields = {"tile_height", "tile_search_radius", "tile_trigger_height", "tile_seam_band_px"}
-        hint = "a whole number, e.g. `1600`" if field in int_fields else "a decimal, e.g. `3.5`"
-        awaiting_reply[user_id] = {"type": "tile_field", "extra": {"field": field}}
-        await safe_edit(
-            query.message,
-            f"✍️ **Reply to this message with the new {pretty}** ({hint}).\n"
-            f"Reply with `default` to reset to Original/Default."
-        )
-        return
-
-    if data == "tile_bool_tile_enabled":
-        await safe_edit(query.message, "✂️ **Tiling Enabled:**", reply_markup=kb_tile_bool_select(cfg, "tile_enabled"))
-        return
-
-    if data.startswith("tileboolset_"):
-        rest = data[len("tileboolset_"):]
-        field, choice = rest.rsplit("_", 1)
-        cfg[field] = None if choice == "default" else (choice == "on")
-        await save_user_config(user_id)
-        await safe_answer(query, "Updated")
-        await safe_edit(query.message, "✂️ **Tiling Enabled:**", reply_markup=kb_tile_bool_select(cfg, field))
-        return
-
-    if data == "tile_reset_all":
-        for field in (
-            "tile_enabled", "tile_height", "tile_search_radius", "tile_trigger_height",
-            "tile_flat_threshold", "tile_seam_band_px", "tile_seam_diff_threshold",
-        ):
-            cfg[field] = None
-        await save_user_config(user_id)
-        await safe_answer(query, "Tiling settings reset to Original/Default")
-        await safe_edit(
-            query.message,
-            "✂️ **Tiling Settings (Manhwa)**\nAll settings reset to Original/Default.",
-            reply_markup=kb_tiling_menu(cfg)
-        )
-        return
-
     if data == "menu_backup":
         await safe_edit(
             query.message,
             "💾 **Backup Settings**\n"
-            "Export your full settings (language, font, appearance, tiling, "
+            "Export your full settings (language, font, appearance, "
             "API, prompts, output format) as a JSON file you can save, or "
             "import a previously exported JSON file to restore/copy a config.\n\n"
             "**Note:** By exporting this JSON, you can also manually edit all 70+ hidden parameters from `main.py`!",
@@ -1782,52 +1660,6 @@ async def handle_reply_capture(client, message: Message):
         await message.reply_text(f"✅ {pretty} set to `{value}`.", reply_markup=kb_detection_menu(cfg))
         return
 
-    if kind == "tile_field":
-        field = pending_reply["extra"]["field"]
-        pretty = {
-            "tile_height": "Tile Height (px)",
-            "tile_search_radius": "Safe-Cut Search Radius (px)",
-            "tile_trigger_height": "Trigger Height (px)",
-            "tile_flat_threshold": "Flatness Threshold",
-            "tile_seam_band_px": "Seam Check Band (px)",
-            "tile_seam_diff_threshold": "Seam Duplicate Diff Threshold",
-        }.get(field, field)
-
-        if text.lower() == "default":
-            cfg[field] = None
-            await save_user_config(user_id)
-            awaiting_reply.pop(user_id, None)
-            await message.reply_text(f"✅ {pretty} reset to Original/Default.", reply_markup=kb_tiling_menu(cfg))
-            return
-
-        int_fields = {"tile_height", "tile_search_radius", "tile_trigger_height", "tile_seam_band_px"}
-        is_int_field = field in int_fields
-        try:
-            value = int(text) if is_int_field else float(text)
-            if value <= 0:
-                raise ValueError
-        except ValueError:
-            hint = "a positive whole number (e.g. `1600`)" if is_int_field else "a positive decimal (e.g. `3.5`)"
-            await message.reply_text(f"❌ Please reply with {hint}, or `default` to reset. Try again.")
-            return
-
-        if field in ("tile_height", "tile_trigger_height"):
-            other_field = "tile_trigger_height" if field == "tile_height" else "tile_height"
-            other_value = cfg.get(other_field)
-            if other_value is not None:
-                if field == "tile_height" and value > other_value:
-                    await message.reply_text(f"❌ Tile Height ({value}) shouldn't exceed Trigger Height ({other_value}). Try again.")
-                    return
-                if field == "tile_trigger_height" and value < other_value:
-                    await message.reply_text(f"❌ Trigger Height ({value}) shouldn't be less than Tile Height ({other_value}). Try again.")
-                    return
-
-        cfg[field] = value
-        await save_user_config(user_id)
-        awaiting_reply.pop(user_id, None)
-        await message.reply_text(f"✅ {pretty} set to `{value}`.", reply_markup=kb_tiling_menu(cfg))
-        return
-
     if kind == "prompt_name":
         prompt_kind = pending_reply["extra"]["kind"]
         if len(text) > PROMPT_NAME_MAX_LEN:
@@ -1977,191 +1809,7 @@ def flatten_and_order(input_dir, content_type="manhwa", cfg=None):
             shutil.move(os.path.join(input_dir, fname), os.path.join(input_dir, new_name))
         ordered_map[idx] = new_name
 
-    tile_manifest = None
-    if content_type == "manhwa":
-        tile_manifest = tile_tall_pages(input_dir, ordered_map, cfg=cfg)
-
-    return ordered_map, tile_manifest
-
-# ================= Long-Strip Tiling (Manhwa) =================
-def _compute_row_flatness(im):
-    import numpy as np
-    gray = im.convert("L")
-    arr = np.asarray(gray, dtype=np.float32)
-    return arr.std(axis=1)
-
-def _find_safe_cut_row(row_flatness, target_y, search_window, min_y, max_y, flat_threshold=MANHWA_SAFE_CUT_FLAT_THRESHOLD):
-    if row_flatness[target_y] < flat_threshold:
-        return target_y
-    for delta in range(1, search_window + 1):
-        up = target_y - delta
-        down = target_y + delta
-        if down <= max_y and row_flatness[down] < flat_threshold:
-            return down
-        if up >= min_y and row_flatness[up] < flat_threshold:
-            return up
-    return None  
-
-def tile_tall_pages(input_dir, ordered_map, cfg=None):
-    from PIL import Image
-
-    cfg = cfg or {}
-    if cfg.get("tile_enabled") is False:
-        return {} 
-
-    tile_height = cfg.get("tile_height") or MANHWA_TILE_HEIGHT
-    tile_search_radius = cfg.get("tile_search_radius") or MANHWA_TILE_OVERLAP
-    tile_trigger_height = cfg.get("tile_trigger_height") or MANHWA_TILE_TRIGGER_HEIGHT
-    tile_flat_threshold = cfg.get("tile_flat_threshold") or MANHWA_SAFE_CUT_FLAT_THRESHOLD
-
-    manifest = {}
-    for idx, fname in list(ordered_map.items()):
-        path = os.path.join(input_dir, fname)
-        if not os.path.exists(path):
-            continue
-        with Image.open(path) as im:
-            width, height = im.size
-            if height <= tile_trigger_height:
-                continue  
-
-            im = im.convert("RGB")
-            row_flatness = _compute_row_flatness(im)
-            search_window = tile_search_radius  
-
-            tile_files = []
-            tile_heights = []
-            forced_cut_rows = []  # cuts that landed on non-flat (likely mid-art/mid-bubble) rows
-            y = 0
-            tile_n = 0
-            max_extend_attempts = 6  # cap the widening search so we don't loop forever on noisy art
-            while y < height:
-                target_bottom = min(y + tile_height, height)
-                if target_bottom >= height:
-                    cut = height
-                    was_forced = False
-                else:
-                    cut = _find_safe_cut_row(row_flatness, target_bottom, search_window, y + 1, height - 1, tile_flat_threshold)
-                    was_forced = cut is None
-                    extended_target = target_bottom
-                    attempts = 0
-                    while cut is None and extended_target < height and attempts < max_extend_attempts:
-                        extended_target = min(extended_target + tile_search_radius, height)
-                        attempts += 1
-                        if extended_target >= height:
-                            cut = height
-                            was_forced = False  # cutting at the true bottom of the strip is fine
-                            break
-                        cut = _find_safe_cut_row(row_flatness, extended_target, search_window, y + 1, height - 1, tile_flat_threshold)
-                        if cut is not None:
-                            was_forced = False
-                    if cut is None:
-                        # Never found a flat row even after widening the search — fall back to
-                        # the original target and flag it, since this cut may slice through
-                        # a bubble/panel and cause duplicated or clipped content at the seam.
-                        cut = target_bottom
-                        was_forced = True
-
-                if was_forced:
-                    forced_cut_rows.append(cut)
-
-                tile = im.crop((0, y, width, cut))
-                tile_name = f"{os.path.splitext(fname)[0]}_tile{tile_n:03d}.jpg"
-                tile.save(os.path.join(input_dir, tile_name), quality=95)
-                tile_files.append(tile_name)
-                tile_heights.append(cut - y)
-                tile_n += 1
-                if cut >= height:
-                    break
-                y = cut
-
-            manifest[idx] = {
-                "tiles": tile_files,
-                "heights": tile_heights,
-                "width": width,
-                "original_height": height,
-                "original_name": fname,
-                "forced_cut_rows": forced_cut_rows,  
-            }
-        os.remove(path)  
-    return manifest
-
-SEAM_CHECK_BAND_PX = 40
-SEAM_DUPLICATE_DIFF_THRESHOLD = 6.0
-
-def _seam_looks_duplicated(recomposed_im, seam_y, band_px=SEAM_CHECK_BAND_PX, diff_threshold=SEAM_DUPLICATE_DIFF_THRESHOLD):
-    import numpy as np
-    width, height = recomposed_im.size
-    top = max(0, seam_y - band_px)
-    bottom = min(height, seam_y + band_px)
-    if bottom - top < band_px * 2:
-        return False  
-    region = recomposed_im.crop((0, top, width, bottom)).convert("L")
-    arr = np.asarray(region, dtype=np.float32)
-    upper_band = arr[:band_px]
-    lower_band = arr[band_px:]
-    if upper_band.shape != lower_band.shape:
-        return False
-    diff = np.abs(upper_band - lower_band).mean()
-    return diff < diff_threshold
-
-def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None):
-    from PIL import Image
-    cfg = cfg or {}
-    seam_band_px = cfg.get("tile_seam_band_px") or SEAM_CHECK_BAND_PX
-    seam_diff_threshold = cfg.get("tile_seam_diff_threshold") or SEAM_DUPLICATE_DIFF_THRESHOLD
-
-    tiles = manifest_entry["tiles"]
-    heights = manifest_entry["heights"]
-    width = manifest_entry["width"]
-    total_height = manifest_entry["original_height"]
-    forced_cut_rows = set(manifest_entry.get("forced_cut_rows", []))
-
-    translated_tile_paths = []
-    for tile_name in tiles:
-        stem = os.path.splitext(tile_name)[0]
-        found = None
-        for ext in IMAGE_EXTS:
-            candidate = os.path.join(translated_dir, stem + ext)
-            if os.path.exists(candidate):
-                found = candidate
-                break
-        if found is None:
-            return None  
-        translated_tile_paths.append(found)
-
-    recomposed = Image.new("RGB", (width, total_height), (255, 255, 255))
-    seam_ys = []  
-    y_cursor = 0
-    for i, tile_path in enumerate(translated_tile_paths):
-        with Image.open(tile_path) as tile_im:
-            tile_im = tile_im.convert("RGB")
-            if tile_im.size != (width, heights[i]):
-                tile_im = tile_im.resize((width, heights[i]))
-            recomposed.paste(tile_im, (0, y_cursor))
-            y_cursor += tile_im.height
-            if i < len(translated_tile_paths) - 1:
-                seam_ys.append(y_cursor)
-
-    # Check every seam for duplicated/misaligned content, not just seams that were
-    # forced through non-flat rows. Even a "safe" flat-row cut can look duplicated
-    # after inpainting/redrawing shifts art slightly, so this can't be skipped —
-    # forced cuts just get a slightly wider tolerance since they're higher-risk.
-    flagged_seams = []
-    for seam_y in seam_ys:
-        was_forced = any(abs(seam_y - forced_y) <= 2 for forced_y in forced_cut_rows)
-        effective_threshold = seam_diff_threshold * (1.4 if was_forced else 1.0)
-        if _seam_looks_duplicated(recomposed, seam_y, band_px=seam_band_px, diff_threshold=effective_threshold):
-            flagged_seams.append(seam_y)
-
-    out_name = manifest_entry["original_name"]
-    out_path = os.path.join(translated_dir, out_name)
-    recomposed.save(out_path, quality=95)
-    for p in translated_tile_paths:
-        try:
-            os.remove(p)
-        except Exception:
-            pass
-    return (out_path, flagged_seams)
+    return ordered_map, None
 
 def build_dynamic_system_instruction(cfg):
     system_text = cfg["system_prompt_text"].replace("{target_lang}", cfg["target_lang"])
@@ -2174,20 +1822,32 @@ def build_dynamic_system_instruction(cfg):
 # ================= MangaTranslator CLI Mappings =================
 _cli_help_cache = {"text": None}
 
-def _get_main_help_text():
+async def _get_main_help_text():
+    # Previously this ran subprocess.run(...) synchronously, which blocks
+    # Pyrogram's single event loop for the entire call (up to 30s). While
+    # blocked, nothing else can run - not the menu, not /cancel, nothing -
+    # which is exactly why the bot looked "frozen" during long jobs and why
+    # it sometimes threw a timeout error. Switching to asyncio's subprocess
+    # + wait_for keeps the event loop free while this runs.
     if _cli_help_cache["text"] is None:
         try:
-            result = subprocess.run(
-                ["python", "MangaTranslator/main.py", "--help"],
-                capture_output=True, text=True, timeout=30
+            proc = await asyncio.create_subprocess_exec(
+                "python", "MangaTranslator/main.py", "--help",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
-            _cli_help_cache["text"] = (result.stdout or "") + (result.stderr or "")
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=30)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                return ""
+            _cli_help_cache["text"] = (stdout_b or b"").decode(errors="replace") + (stderr_b or b"").decode(errors="replace")
         except Exception:
             _cli_help_cache["text"] = ""
     return _cli_help_cache["text"]
 
-def cli_supports_flag(flag):
-    return flag in _get_main_help_text()
+async def cli_supports_flag(flag):
+    return flag in (await _get_main_help_text())
 
 # Master CLI Flag Mapper
 CLI_MAPPINGS = {
@@ -2284,7 +1944,14 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
     total_files = len(files)
     all_translated_outputs = []  
     failure_reasons = []  
-    resume_from = paused_jobs.pop(user_id, {}).get("stopped_at_file") or 1
+    paused_state = paused_jobs.pop(user_id, {})
+    resume_from = paused_state.get("stopped_at_file") or 1
+    # The file that was actively running (downloaded/extracted) when the
+    # job was paused. Its input_dir + manifest are still on disk (job_root is
+    # NOT wiped on resume), so re-download/re-extract is unnecessary
+    # and was the cause of "resume restarts from scratch".
+    resume_in_progress_idx = paused_state.get("stopped_at_file")
+    manifest_cache_path = os.path.join(job_root, "page_manifest_cache.json")
 
     for file_idx, source_message in enumerate(files, start=1):
         if file_idx < resume_from:
@@ -2296,46 +1963,60 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             return
 
         input_dir = os.path.join(job_root, f"input_{file_idx:03d}")
-        os.makedirs(input_dir, exist_ok=True)
+        reuse_existing_pages = (
+            file_idx == resume_in_progress_idx
+            and os.path.isdir(input_dir)
+            and any(f.lower().endswith(IMAGE_EXTS) for f in os.listdir(input_dir))
+            and os.path.exists(manifest_cache_path)
+        )
 
-        await safe_edit(status_msg, build_status_text(mode_label, "📥 Downloading payload", file_idx, total_files, 0, 0, 5))
-        downloaded_path = await source_message.download(file_name=os.path.join(job_root, f"src_{file_idx:03d}"))
-
-        if source_message.document and source_message.document.file_name:
-            ext = os.path.splitext(source_message.document.file_name)[1] or ".jpg"
-        elif source_message.photo:
-            ext = ".jpg"
+        if reuse_existing_pages:
+            await safe_edit(status_msg, build_status_text(mode_label, "♻️ Resuming with existing pages (skipping re-download)", file_idx, total_files, 0, 0, 20))
+            with open(manifest_cache_path) as mf:
+                cached = json.load(mf)
+            ordered_map = {int(k): v for k, v in cached["ordered_map"].items()}
+            # Deliberately NOT deleted here: if this file gets paused again
+            # mid-translation, the next resume must still find this cache
+            # and reuse the same pages. It's cleaned up below once this file
+            # fully completes (or when job_root is wiped at job end/new job).
         else:
-            ext = ""
+            os.makedirs(input_dir, exist_ok=True)
 
-        if ext and not downloaded_path.lower().endswith(ext.lower()):
-            fixed_path = downloaded_path + ext
-            os.rename(downloaded_path, fixed_path)
-            downloaded_path = fixed_path
+            await safe_edit(status_msg, build_status_text(mode_label, "📥 Downloading payload", file_idx, total_files, 0, 0, 5))
+            downloaded_path = await source_message.download(file_name=os.path.join(job_root, f"src_{file_idx:03d}"))
 
-        await safe_edit(status_msg, build_status_text(mode_label, "📂 Extracting", file_idx, total_files, 0, 0, 15))
-        if mode == "archive" or downloaded_path.lower().endswith(('.zip', '.cbz')):
-            extract_archive(downloaded_path, input_dir)
-        elif mode == "pdf" or downloaded_path.lower().endswith('.pdf'):
-            extract_pdf(downloaded_path, input_dir)
-        else:
-            shutil.move(downloaded_path, os.path.join(input_dir, os.path.basename(downloaded_path)))
+            if source_message.document and source_message.document.file_name:
+                ext = os.path.splitext(source_message.document.file_name)[1] or ".jpg"
+            elif source_message.photo:
+                ext = ".jpg"
+            else:
+                ext = ""
 
-        ordered_map, tile_manifest = flatten_and_order(input_dir, content_type=cfg.get("content_type", "manhwa"), cfg=cfg)
+            if ext and not downloaded_path.lower().endswith(ext.lower()):
+                fixed_path = downloaded_path + ext
+                os.rename(downloaded_path, fixed_path)
+                downloaded_path = fixed_path
+
+            await safe_edit(status_msg, build_status_text(mode_label, "📂 Extracting", file_idx, total_files, 0, 0, 15))
+            if mode == "archive" or downloaded_path.lower().endswith(('.zip', '.cbz')):
+                extract_archive(downloaded_path, input_dir)
+            elif mode == "pdf" or downloaded_path.lower().endswith('.pdf'):
+                extract_pdf(downloaded_path, input_dir)
+            else:
+                shutil.move(downloaded_path, os.path.join(input_dir, os.path.basename(downloaded_path)))
+
+            ordered_map, _ = flatten_and_order(input_dir, content_type=cfg.get("content_type", "manhwa"), cfg=cfg)
+
+            # Cache so a future pause/resume of THIS file can skip straight
+            # back to here instead of re-extracting again.
+            with open(manifest_cache_path, "w") as mf:
+                json.dump({"file_idx": file_idx, "ordered_map": ordered_map}, mf)
+
         total_images = len(ordered_map)
 
         if total_images == 0:
             await safe_edit(status_msg, f"⚠️ File {file_idx}/{total_files}: no valid images found, skipping.")
             continue
-
-        if tile_manifest:
-            tiled_pages = len(tile_manifest)
-            total_tiles = sum(len(v["tiles"]) for v in tile_manifest.values())
-            await safe_edit(
-                status_msg,
-                build_status_text(mode_label, f"✂️ Tiling {tiled_pages} tall page(s) into {total_tiles} tile(s) for detection", file_idx, total_files, 0, total_images, 20)
-            )
-            total_images = len([f for f in os.listdir(input_dir) if f.lower().endswith(IMAGE_EXTS)])
 
         dynamic_system_instruction = build_dynamic_system_instruction(cfg)
 
@@ -2365,9 +2046,9 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             "--special-instructions", dynamic_system_instruction
         ]
 
-        if cfg.get("osb_enabled", True) and cli_supports_flag("--osb-enable"):
+        if cfg.get("osb_enabled", True) and await cli_supports_flag("--osb-enable"):
             cmd.append("--osb-enable")
-            if cli_supports_flag("--osb-font-dir"):
+            if await cli_supports_flag("--osb-font-dir"):
                 cmd += ["--osb-font-dir", font_dir_for_run]
 
         # SAFETY NET: strip any choice-restricted field holding an invalid value
@@ -2387,7 +2068,7 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
         for key, config_meta in CLI_MAPPINGS.items():
             flag, val_type = config_meta
             val = cfg.get(key)
-            if val is not None and cli_supports_flag(flag):
+            if val is not None and await cli_supports_flag(flag):
                 if val_type == "val":
                     cmd += [flag, str(val)]
                 elif val_type == "bool_true" and val is True:
@@ -2460,35 +2141,6 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             )
             continue
 
-        if tile_manifest:
-            await safe_edit(status_msg, build_status_text(mode_label, "🧵 Recomposing tiled pages", file_idx, total_files, total_images, total_images, 85))
-            recompose_failures = []
-            duplicate_suspected_pages = []
-            for page_idx, manifest_entry in tile_manifest.items():
-                result = recompose_tiled_page(file_translated_dir, page_idx, manifest_entry, cfg=cfg)
-                if result is None:
-                    recompose_failures.append(page_idx)
-                    continue
-                result_path, flagged_seams = result
-                if flagged_seams:
-                    duplicate_suspected_pages.append(page_idx)
-            if recompose_failures:
-                await safe_edit(
-                    status_msg,
-                    f"⚠️ File {file_idx}/{total_files}: {len(recompose_failures)} tiled page(s) "
-                    f"had a tile that failed to translate, so those pages may be incomplete. "
-                    f"Continuing with the rest."
-                )
-            if duplicate_suspected_pages:
-                pages_list = ", ".join(str(p) for p in duplicate_suspected_pages)
-                await safe_edit(
-                    status_msg,
-                    f"⚠️ File {file_idx}/{total_files}: possible duplicated text detected on "
-                    f"page(s) {pages_list} (unusually tall panel with no clean cut point found). "
-                    f"Please double-check these pages in the output."
-                )
-            produced_files = [f for f in os.listdir(file_translated_dir) if f.lower().endswith(IMAGE_EXTS)]
-
         try:
             if cfg['output_format'] == 'img':
                 image_files = sorted(
@@ -2523,6 +2175,14 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             await safe_edit(status_msg, f"❌ **Failed to send file {file_idx}/{total_files}:**\n`{send_err}`")
             active_jobs.pop(user_id, None)
             return
+
+        # This file is fully done - drop its cached page manifest so a future
+        # pause/resume on a DIFFERENT file won't ever look at stale data.
+        if os.path.exists(manifest_cache_path):
+            try:
+                os.remove(manifest_cache_path)
+            except Exception:
+                pass
 
     if not all_translated_outputs:
         if failure_reasons:

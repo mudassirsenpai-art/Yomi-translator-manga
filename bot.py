@@ -69,6 +69,14 @@ MANHWA_TILE_HEIGHT = 3200
 MANHWA_TILE_OVERLAP = 400
 MANHWA_TILE_TRIGGER_HEIGHT = 3800
 MANHWA_SAFE_CUT_FLAT_THRESHOLD = 3.5
+# Min/Max cuts bound how many pieces a single tall page can be sliced into.
+# min=0 means "no forced cutting" (page can pass through as one tile if it
+# doesn't need splitting). max caps the total number of cuts made per page —
+# once the cap is hit, whatever height remains is kept as one final (possibly
+# larger than tile_height) tile rather than forcing another cut through a
+# bubble/panel.
+MANHWA_TILE_MIN_CUTS = 0
+MANHWA_TILE_MAX_CUTS = 6
 
 DEFAULT_SYSTEM_PROMPT_NAME = "Default Localization Engine"
 DEFAULT_SYSTEM_PROMPT_TEXT = (
@@ -127,7 +135,7 @@ def default_config():
         # Tiling Settings
         "tile_enabled": None, "tile_height": None, "tile_search_radius": None, 
         "tile_trigger_height": None, "tile_flat_threshold": None, "tile_seam_band_px": None, 
-        "tile_seam_diff_threshold": None,
+        "tile_seam_diff_threshold": None, "tile_min_cuts": None, "tile_max_cuts": None,
 
         # UI Modifiable Flags (Appearance, Detect)
         "min_font_size": None, "max_font_size": None, "auto_vertical_text": None,
@@ -728,6 +736,8 @@ def kb_tiling_menu(cfg):
     flat = _tile_val_label(cfg, "tile_flat_threshold", str(MANHWA_SAFE_CUT_FLAT_THRESHOLD))
     band = _tile_val_label(cfg, "tile_seam_band_px", str(SEAM_CHECK_BAND_PX))
     diff = _tile_val_label(cfg, "tile_seam_diff_threshold", str(SEAM_DUPLICATE_DIFF_THRESHOLD))
+    min_cuts = _tile_val_label(cfg, "tile_min_cuts", str(MANHWA_TILE_MIN_CUTS))
+    max_cuts = _tile_val_label(cfg, "tile_max_cuts", str(MANHWA_TILE_MAX_CUTS))
 
     rows = [
         [InlineKeyboardButton(f"✂️ Tiling: {enabled_label}", callback_data="tile_bool_tile_enabled")],
@@ -737,6 +747,8 @@ def kb_tiling_menu(cfg):
         [InlineKeyboardButton(f"⬜ Flatness Threshold: {flat}", callback_data="tile_field_tile_flat_threshold")],
         [InlineKeyboardButton(f"📊 Seam Check Band (px): {band}", callback_data="tile_field_tile_seam_band_px")],
         [InlineKeyboardButton(f"🎯 Seam Duplicate Diff Threshold: {diff}", callback_data="tile_field_tile_seam_diff_threshold")],
+        [InlineKeyboardButton(f"🔽 Min Cuts: {min_cuts}", callback_data="tile_field_tile_min_cuts")],
+        [InlineKeyboardButton(f"🔼 Max Cuts: {max_cuts}", callback_data="tile_field_tile_max_cuts")],
         [InlineKeyboardButton("♻️ Reset All to Original/Default", callback_data="tile_reset_all")],
         [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")],
     ]
@@ -1402,7 +1414,12 @@ async def handle_callbacks(client, query: CallbackQuery):
             "• **Flatness Threshold**: how blank a row must be to count as "
             "a safe cut.\n"
             "• **Seam Check Band / Diff Threshold**: how the final duplicate-"
-            "text check compares pixels just above/below a seam.\n\n"
+            "text check compares pixels just above/below a seam.\n"
+            "• **Min Cuts**: lowest number of cuts allowed on a page — `0` "
+            "means it's fine for a page to pass through with no cuts at all.\n"
+            "• **Max Cuts**: highest number of cuts allowed on a page. Once "
+            "hit, whatever remains is kept as one final (possibly larger) "
+            "tile instead of forcing another cut through a bubble.\n\n"
             "_\"Original/Default\" = untouched, exactly like before this menu existed._",
             reply_markup=kb_tiling_menu(cfg)
         )
@@ -1417,9 +1434,15 @@ async def handle_callbacks(client, query: CallbackQuery):
             "tile_flat_threshold": "Flatness Threshold",
             "tile_seam_band_px": "Seam Check Band (px)",
             "tile_seam_diff_threshold": "Seam Duplicate Diff Threshold",
+            "tile_min_cuts": "Min Cuts",
+            "tile_max_cuts": "Max Cuts",
         }.get(field, field)
-        int_fields = {"tile_height", "tile_search_radius", "tile_trigger_height", "tile_seam_band_px"}
+        int_fields = {"tile_height", "tile_search_radius", "tile_trigger_height", "tile_seam_band_px", "tile_min_cuts", "tile_max_cuts"}
         hint = "a whole number, e.g. `1600`" if field in int_fields else "a decimal, e.g. `3.5`"
+        if field == "tile_min_cuts":
+            hint = "a whole number, `0` or more (0 = allow zero cuts)"
+        elif field == "tile_max_cuts":
+            hint = "a whole number, `1` or more (caps total cuts per page)"
         awaiting_reply[user_id] = {"type": "tile_field", "extra": {"field": field}}
         await safe_edit(
             query.message,
@@ -1445,6 +1468,7 @@ async def handle_callbacks(client, query: CallbackQuery):
         for field in (
             "tile_enabled", "tile_height", "tile_search_radius", "tile_trigger_height",
             "tile_flat_threshold", "tile_seam_band_px", "tile_seam_diff_threshold",
+            "tile_min_cuts", "tile_max_cuts",
         ):
             cfg[field] = None
         await save_user_config(user_id)
@@ -1791,6 +1815,8 @@ async def handle_reply_capture(client, message: Message):
             "tile_flat_threshold": "Flatness Threshold",
             "tile_seam_band_px": "Seam Check Band (px)",
             "tile_seam_diff_threshold": "Seam Duplicate Diff Threshold",
+            "tile_min_cuts": "Min Cuts",
+            "tile_max_cuts": "Max Cuts",
         }.get(field, field)
 
         if text.lower() == "default":
@@ -1800,14 +1826,24 @@ async def handle_reply_capture(client, message: Message):
             await message.reply_text(f"✅ {pretty} reset to Original/Default.", reply_markup=kb_tiling_menu(cfg))
             return
 
-        int_fields = {"tile_height", "tile_search_radius", "tile_trigger_height", "tile_seam_band_px"}
+        int_fields = {"tile_height", "tile_search_radius", "tile_trigger_height", "tile_seam_band_px", "tile_min_cuts", "tile_max_cuts"}
         is_int_field = field in int_fields
+        # tile_min_cuts is the only field allowed to be 0 (0 = no forced cutting).
+        min_allowed = 0 if field == "tile_min_cuts" else 1
         try:
             value = int(text) if is_int_field else float(text)
-            if value <= 0:
+            if is_int_field:
+                if value < min_allowed:
+                    raise ValueError
+            elif value <= 0:
                 raise ValueError
         except ValueError:
-            hint = "a positive whole number (e.g. `1600`)" if is_int_field else "a positive decimal (e.g. `3.5`)"
+            if field == "tile_min_cuts":
+                hint = "a whole number, `0` or greater (e.g. `0` or `2`)"
+            elif is_int_field:
+                hint = "a positive whole number (e.g. `1600`)"
+            else:
+                hint = "a positive decimal (e.g. `3.5`)"
             await message.reply_text(f"❌ Please reply with {hint}, or `default` to reset. Try again.")
             return
 
@@ -1820,6 +1856,17 @@ async def handle_reply_capture(client, message: Message):
                     return
                 if field == "tile_trigger_height" and value < other_value:
                     await message.reply_text(f"❌ Trigger Height ({value}) shouldn't be less than Tile Height ({other_value}). Try again.")
+                    return
+
+        if field in ("tile_min_cuts", "tile_max_cuts"):
+            other_field = "tile_max_cuts" if field == "tile_min_cuts" else "tile_min_cuts"
+            other_value = cfg.get(other_field)
+            if other_value is not None:
+                if field == "tile_min_cuts" and value > other_value:
+                    await message.reply_text(f"❌ Min Cuts ({value}) shouldn't exceed Max Cuts ({other_value}). Try again.")
+                    return
+                if field == "tile_max_cuts" and value < other_value:
+                    await message.reply_text(f"❌ Max Cuts ({value}) shouldn't be less than Min Cuts ({other_value}). Try again.")
                     return
 
         cfg[field] = value
@@ -2013,6 +2060,21 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
     tile_search_radius = cfg.get("tile_search_radius") or MANHWA_TILE_OVERLAP
     tile_trigger_height = cfg.get("tile_trigger_height") or MANHWA_TILE_TRIGGER_HEIGHT
     tile_flat_threshold = cfg.get("tile_flat_threshold") or MANHWA_SAFE_CUT_FLAT_THRESHOLD
+    # min_cuts: 0 = it's fine for a page to end up with zero cuts (untiled).
+    # max_cuts: hard cap on the number of cuts made per page — once reached,
+    # whatever height remains is kept as a single final tile (which may be
+    # taller than tile_height) instead of forcing another cut through a
+    # bubble/panel.
+    tile_min_cuts = cfg.get("tile_min_cuts")
+    tile_min_cuts = MANHWA_TILE_MIN_CUTS if tile_min_cuts is None else tile_min_cuts
+    tile_max_cuts = cfg.get("tile_max_cuts")
+    tile_max_cuts = MANHWA_TILE_MAX_CUTS if tile_max_cuts is None else tile_max_cuts
+    if tile_max_cuts < 1:
+        tile_max_cuts = 1
+    if tile_min_cuts < 0:
+        tile_min_cuts = 0
+    if tile_min_cuts > tile_max_cuts:
+        tile_min_cuts = tile_max_cuts
 
     manifest = {}
     for idx, fname in list(ordered_map.items()):
@@ -2033,10 +2095,15 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
             forced_cut_rows = []  # cuts that landed on non-flat (likely mid-art/mid-bubble) rows
             y = 0
             tile_n = 0
+            cuts_made = 0  # number of cuts actually made so far (tiles - 1)
             max_extend_attempts = 6  # cap the widening search so we don't loop forever on noisy art
             while y < height:
                 target_bottom = min(y + tile_height, height)
-                if target_bottom >= height:
+                reached_max_cuts = cuts_made >= tile_max_cuts
+                if target_bottom >= height or reached_max_cuts:
+                    # Either we're at the true bottom of the strip, or we've hit the
+                    # Max Cuts cap — either way, take the rest as one final tile
+                    # rather than forcing another cut that might slice a bubble.
                     cut = height
                     was_forced = False
                 else:
@@ -2070,9 +2137,17 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
                 tile_files.append(tile_name)
                 tile_heights.append(cut - y)
                 tile_n += 1
+                if cut < height:
+                    cuts_made += 1
                 if cut >= height:
                     break
                 y = cut
+
+            # Min Cuts: if this page ended up with fewer cuts than required and it
+            # still had room to cut further, that's fine — min_cuts=0 just means we
+            # never force extra cuts beyond what the page actually needs. We only
+            # log tile count here; we never manufacture additional cuts purely to
+            # satisfy a minimum, since inventing a cut risks slicing a bubble.
 
             manifest[idx] = {
                 "tiles": tile_files,
@@ -2080,7 +2155,8 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
                 "width": width,
                 "original_height": height,
                 "original_name": fname,
-                "forced_cut_rows": forced_cut_rows,  
+                "forced_cut_rows": forced_cut_rows,
+                "cuts_made": cuts_made,
             }
         os.remove(path)  
     return manifest

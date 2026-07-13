@@ -18,8 +18,39 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
+      - name: Checkout Bot Repository
         uses: actions/checkout@v4
+
+      # bot.py lives in this (bot) repo, but the actual translation engine
+      # (main.py, core/, utils/, models/, fonts/) lives in the
+      # Yomi-MangaTranslator repo. actions/checkout only pulls in the repo
+      # the workflow belongs to, so without this step main.py never exists
+      # on the runner at all - that's the real cause of the
+      # "can't open file .../main.py: No such file or directory" error,
+      # not a path typo in bot.py.
+      - name: Checkout Translation Engine Repository
+        uses: actions/checkout@v4
+        with:
+          repository: mudassirsenpai-art/Yomi-MangaTranslator
+          path: engine
+
+      # Copy the engine's files into the job's working directory (root),
+      # next to bot.py, so "python main.py" (as called from bot.py) resolves
+      # correctly without changing any paths inside bot.py itself.
+      # -n (no-clobber) so files already in the bot repo (e.g. bot.py's own
+      # requirements.txt, if any) are never overwritten by the engine's copy.
+      - name: Merge Engine Files Into Workspace
+        run: |
+          cp -rn engine/. .
+          rm -rf engine
+
+      - name: Verify Engine Checkout
+        run: |
+          if [ ! -f main.py ]; then
+            echo "::error::main.py not found after merging engine repo - checkout of Yomi-MangaTranslator likely failed or repo name/branch is wrong."
+            exit 1
+          fi
+          echo "Engine present: $(ls main.py core 2>/dev/null)"
 
       - name: Set up Python 3.10
         uses: actions/setup-python@v4

@@ -62,6 +62,21 @@ CONTENT_TYPES = [
     ("💬 Comic (Western)", "comic"), ("📝 Novel (text only)", "novel"),
 ]
 
+# Bubble-detection-based tiling. The engine's YOLO bubble detector resizes
+# every image to a fixed input size (~640-1600px longest side) before
+# detecting anything, so a single huge strip sent whole makes small/far
+# bubbles shrink below what YOLO can see - they silently fail to detect and
+# come out untranslated. Splitting into tiles keeps each piece's resolution
+# high enough for detection to work, while cut points are chosen using the
+# SAME bubble detector (via `main.py --detect-only`) so a cut can never land
+# inside a bubble - only in the gaps between them.
+MANHWA_TILE_HEIGHT = 1400
+MANHWA_TILE_OVERLAP = 300
+MANHWA_TILE_TRIGGER_HEIGHT = 1800
+MANHWA_TILE_DETECT_CONFIDENCE = 0.5
+SEAM_CHECK_BAND_PX = 40
+SEAM_DUPLICATE_DIFF_THRESHOLD = 6.0
+
 DEFAULT_SYSTEM_PROMPT_NAME = "Default Localization Engine"
 DEFAULT_SYSTEM_PROMPT_TEXT = (
     "You are a professional multi-language manga and comic localization engine.\n"
@@ -126,6 +141,11 @@ def default_config():
         "confidence": None, "conjoined_confidence": None, "panel_confidence": None,
         "seg_model": None, "conjoined_detection": None, "bubble_detector_model": None,
         "ocr_method": None, "osb_enabled": True,
+
+        # Tiling Settings (bubble-detection-based long-strip splitting)
+        "tile_enabled": None, "tile_height": None, "tile_search_radius": None,
+        "tile_trigger_height": None, "tile_detect_confidence": None,
+        "tile_seam_band_px": None, "tile_seam_diff_threshold": None,
 
         # ALL OTHER main.py flags mapped for JSON Import/Export
         "temperature": None, "top_p": None, "top_k": None, "max_tokens": None,
@@ -268,6 +288,8 @@ def kb_main_menu(cfg=None):
     ]
     if cfg is not None and cfg.get("content_type") != "novel":
         rows.append([InlineKeyboardButton("🎯 Detection Settings", callback_data="menu_detection")])
+    if cfg is not None and cfg.get("content_type") == "manhwa":
+        rows.append([InlineKeyboardButton("✂️ Tiling Settings", callback_data="menu_tiling")])
     rows += [
         [InlineKeyboardButton("🧠 Generation Settings", callback_data="xf_group_generation")],
         [InlineKeyboardButton("🧹 Cleaning & Upscaling", callback_data="xf_group_cleaning")],
@@ -700,6 +722,45 @@ def kb_ocr_method_select(cfg):
     rows.append([InlineKeyboardButton("🔙 Back", callback_data="menu_detection")])
     return InlineKeyboardMarkup(rows)
 
+# ================= Tiling Settings Keyboards (Manhwa, bubble-detection-based) =================
+def _tile_val_label(cfg, field, default_display):
+    v = cfg.get(field)
+    return f"Original/Default ({default_display})" if v is None else str(v)
+
+def kb_tiling_menu(cfg):
+    enabled = cfg.get("tile_enabled")
+    enabled_label = "Original/Default (On)" if enabled is None else ("✅ On" if enabled else "❌ Off")
+    height = _tile_val_label(cfg, "tile_height", str(MANHWA_TILE_HEIGHT))
+    radius = _tile_val_label(cfg, "tile_search_radius", str(MANHWA_TILE_OVERLAP))
+    trigger = _tile_val_label(cfg, "tile_trigger_height", str(MANHWA_TILE_TRIGGER_HEIGHT))
+    detect_conf = _tile_val_label(cfg, "tile_detect_confidence", str(MANHWA_TILE_DETECT_CONFIDENCE))
+    band = _tile_val_label(cfg, "tile_seam_band_px", str(SEAM_CHECK_BAND_PX))
+    diff = _tile_val_label(cfg, "tile_seam_diff_threshold", str(SEAM_DUPLICATE_DIFF_THRESHOLD))
+
+    rows = [
+        [InlineKeyboardButton(f"✂️ Tiling: {enabled_label}", callback_data="tile_bool_tile_enabled")],
+        [InlineKeyboardButton(f"📏 Trigger Height (px): {trigger}", callback_data="tile_field_tile_trigger_height")],
+        [InlineKeyboardButton(f"📐 Tile Height (px): {height}", callback_data="tile_field_tile_height")],
+        [InlineKeyboardButton(f"🔍 Safe-Cut Search Radius (px): {radius}", callback_data="tile_field_tile_search_radius")],
+        [InlineKeyboardButton(f"🫧 Bubble Detect Confidence: {detect_conf}", callback_data="tile_field_tile_detect_confidence")],
+        [InlineKeyboardButton(f"📊 Seam Check Band (px): {band}", callback_data="tile_field_tile_seam_band_px")],
+        [InlineKeyboardButton(f"🎯 Seam Duplicate Diff Threshold: {diff}", callback_data="tile_field_tile_seam_diff_threshold")],
+        [InlineKeyboardButton("♻️ Reset All to Original/Default", callback_data="tile_reset_all")],
+        [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+def kb_tile_bool_select(cfg, field):
+    val = cfg.get(field)
+    def mark(v): return "✅ " if val == v else ""
+    rows = [
+        [InlineKeyboardButton(f"{mark(True)}On", callback_data=f"tileboolset_{field}_on")],
+        [InlineKeyboardButton(f"{mark(False)}Off", callback_data=f"tileboolset_{field}_off")],
+        [InlineKeyboardButton(f"{'✅ ' if val is None else ''}Original/Default", callback_data=f"tileboolset_{field}_default")],
+        [InlineKeyboardButton("🔙 Back", callback_data="menu_tiling")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
 def kb_api_menu(cfg):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"Provider: {cfg['provider']}", callback_data="api_provider_open")],
@@ -857,8 +918,9 @@ async def handle_callbacks(client, query: CallbackQuery):
         await safe_edit(
             query.message,
             f"📚 **Content Type**\nCurrent: `{cfg.get('content_type_label', 'Manhwa')}`\n\n"
-            f"🍥 **Manhwa**: long vertical-scroll strips, processed as whole "
-            f"pages.\n"
+            f"🍥 **Manhwa**: long vertical-scroll strips. Tall stitched pages "
+            f"are automatically tiled using bubble detection so cuts never "
+            f"land inside a bubble.\n"
             f"📖 **Manga**: normal single manga pages, right-to-left panels.\n"
             f"💬 **Comic**: Western-style single-page comics.\n"
             f"📝 **Novel**: text-only prose, no bubbles/panels - skips the "
@@ -1334,11 +1396,81 @@ async def handle_callbacks(client, query: CallbackQuery):
         return
 
 
+    if data == "menu_tiling":
+        await safe_edit(
+            query.message,
+            "✂️ **Tiling Settings (Manhwa)**\n"
+            "Controls how tall, stitched long-strip pages get sliced into "
+            "detector-sized windows before translation. Cut points are found "
+            "by running the SAME bubble detector the engine uses, so a cut "
+            "never lands inside a bubble — only in the gaps between them.\n\n"
+            "• **Trigger Height**: pages taller than this get tiled at all.\n"
+            "• **Tile Height**: target height per tile.\n"
+            "• **Safe-Cut Search Radius**: how far to search around the target "
+            "cut line for a gap between bubbles.\n"
+            "• **Bubble Detect Confidence**: confidence threshold used only "
+            "for finding safe cut points (separate from the main translation "
+            "detection confidence).\n"
+            "• **Seam Check Band / Diff Threshold**: a secondary safety check "
+            "on the final stitched image, in case detection missed something.\n\n"
+            "_\"Original/Default\" = untouched, exactly like before this menu existed._",
+            reply_markup=kb_tiling_menu(cfg)
+        )
+        return
+
+    if data.startswith("tile_field_"):
+        field = data.split("tile_field_", 1)[1]
+        pretty = {
+            "tile_height": "Tile Height (px)",
+            "tile_search_radius": "Safe-Cut Search Radius (px)",
+            "tile_trigger_height": "Trigger Height (px)",
+            "tile_detect_confidence": "Bubble Detect Confidence",
+            "tile_seam_band_px": "Seam Check Band (px)",
+            "tile_seam_diff_threshold": "Seam Duplicate Diff Threshold",
+        }.get(field, field)
+        int_fields = {"tile_height", "tile_search_radius", "tile_trigger_height", "tile_seam_band_px"}
+        hint = "a whole number, e.g. `1400`" if field in int_fields else "a decimal, e.g. `0.5`"
+        awaiting_reply[user_id] = {"type": "tile_field", "extra": {"field": field}}
+        await safe_edit(
+            query.message,
+            f"✍️ **Reply to this message with the new {pretty}** ({hint}).\n"
+            f"Reply with `default` to reset to Original/Default."
+        )
+        return
+
+    if data == "tile_bool_tile_enabled":
+        await safe_edit(query.message, "✂️ **Tiling Enabled:**", reply_markup=kb_tile_bool_select(cfg, "tile_enabled"))
+        return
+
+    if data.startswith("tileboolset_"):
+        rest = data[len("tileboolset_"):]
+        field, choice = rest.rsplit("_", 1)
+        cfg[field] = None if choice == "default" else (choice == "on")
+        await save_user_config(user_id)
+        await safe_answer(query, "Updated")
+        await safe_edit(query.message, "✂️ **Tiling Enabled:**", reply_markup=kb_tile_bool_select(cfg, field))
+        return
+
+    if data == "tile_reset_all":
+        for field in (
+            "tile_enabled", "tile_height", "tile_search_radius", "tile_trigger_height",
+            "tile_detect_confidence", "tile_seam_band_px", "tile_seam_diff_threshold",
+        ):
+            cfg[field] = None
+        await save_user_config(user_id)
+        await safe_answer(query, "Tiling settings reset to Original/Default")
+        await safe_edit(
+            query.message,
+            "✂️ **Tiling Settings (Manhwa)**\nAll settings reset to Original/Default.",
+            reply_markup=kb_tiling_menu(cfg)
+        )
+        return
+
     if data == "menu_backup":
         await safe_edit(
             query.message,
             "💾 **Backup Settings**\n"
-            "Export your full settings (language, font, appearance, "
+            "Export your full settings (language, font, appearance, tiling, "
             "API, prompts, output format) as a JSON file you can save, or "
             "import a previously exported JSON file to restore/copy a config.\n\n"
             "**Note:** By exporting this JSON, you can also manually edit all 70+ hidden parameters from `main.py`!",
@@ -1660,6 +1792,54 @@ async def handle_reply_capture(client, message: Message):
         await message.reply_text(f"✅ {pretty} set to `{value}`.", reply_markup=kb_detection_menu(cfg))
         return
 
+    if kind == "tile_field":
+        field = pending_reply["extra"]["field"]
+        pretty = {
+            "tile_height": "Tile Height (px)",
+            "tile_search_radius": "Safe-Cut Search Radius (px)",
+            "tile_trigger_height": "Trigger Height (px)",
+            "tile_detect_confidence": "Bubble Detect Confidence",
+            "tile_seam_band_px": "Seam Check Band (px)",
+            "tile_seam_diff_threshold": "Seam Duplicate Diff Threshold",
+        }.get(field, field)
+
+        if text.lower() == "default":
+            cfg[field] = None
+            await save_user_config(user_id)
+            awaiting_reply.pop(user_id, None)
+            await message.reply_text(f"✅ {pretty} reset to Original/Default.", reply_markup=kb_tiling_menu(cfg))
+            return
+
+        int_fields = {"tile_height", "tile_search_radius", "tile_trigger_height", "tile_seam_band_px"}
+        is_int_field = field in int_fields
+        try:
+            value = int(text) if is_int_field else float(text)
+            if value <= 0:
+                raise ValueError
+            if field == "tile_detect_confidence" and not (0.0 < value <= 1.0):
+                raise ValueError
+        except ValueError:
+            hint = "a positive whole number (e.g. `1400`)" if is_int_field else "a positive decimal (e.g. `0.5`, between 0 and 1 for confidence)"
+            await message.reply_text(f"❌ Please reply with {hint}, or `default` to reset. Try again.")
+            return
+
+        if field in ("tile_height", "tile_trigger_height"):
+            other_field = "tile_trigger_height" if field == "tile_height" else "tile_height"
+            other_value = cfg.get(other_field)
+            if other_value is not None:
+                if field == "tile_height" and value > other_value:
+                    await message.reply_text(f"❌ Tile Height ({value}) shouldn't exceed Trigger Height ({other_value}). Try again.")
+                    return
+                if field == "tile_trigger_height" and value < other_value:
+                    await message.reply_text(f"❌ Trigger Height ({value}) shouldn't be less than Tile Height ({other_value}). Try again.")
+                    return
+
+        cfg[field] = value
+        await save_user_config(user_id)
+        awaiting_reply.pop(user_id, None)
+        await message.reply_text(f"✅ {pretty} set to `{value}`.", reply_markup=kb_tiling_menu(cfg))
+        return
+
     if kind == "prompt_name":
         prompt_kind = pending_reply["extra"]["kind"]
         if len(text) > PROMPT_NAME_MAX_LEN:
@@ -1787,7 +1967,7 @@ def stitch_sliced_images(input_dir):
         if len(slice_files) > 1:
             _stitch_group_vertically(input_dir, base, slice_files)
 
-def flatten_and_order(input_dir, content_type="manhwa", cfg=None):
+async def flatten_and_order(input_dir, content_type="manhwa", cfg=None):
     for root, _, files in os.walk(input_dir, topdown=False):
         for f in files:
             if f.lower().endswith(IMAGE_EXTS):
@@ -1809,7 +1989,243 @@ def flatten_and_order(input_dir, content_type="manhwa", cfg=None):
             shutil.move(os.path.join(input_dir, fname), os.path.join(input_dir, new_name))
         ordered_map[idx] = new_name
 
-    return ordered_map, None
+    tile_manifest = None
+    if content_type == "manhwa":
+        tile_manifest = await tile_tall_pages(input_dir, ordered_map, cfg=cfg)
+
+    return ordered_map, tile_manifest
+
+# ================= Long-Strip Tiling (Manhwa, bubble-detection-based) =================
+async def _detect_bubble_boxes(image_path, cfg):
+    """Calls `main.py --detect-only` on a single image and returns a list of
+    [x0, y0, x1, y1] bubble boxes using the SAME YOLO detector the translation
+    engine uses. Returns None on any failure (missing flag on older main.py,
+    timeout, bad JSON, etc.) so the caller can fall back to a plain cut."""
+    if not await cli_supports_flag("--detect-only"):
+        return None
+
+    cmd = ["python", "MangaTranslator/main.py", "--input", image_path, "--detect-only"]
+
+    confidence = cfg.get("tile_detect_confidence") or cfg.get("confidence") or MANHWA_TILE_DETECT_CONFIDENCE
+    cmd += ["--confidence", str(confidence)]
+    for field, flag in (
+        ("conjoined_confidence", "--conjoined-confidence"),
+        ("seg_model", "--seg-model"),
+        ("bubble_detector_model", "--bubble-detector-model"),
+    ):
+        val = cfg.get(field)
+        if val is not None:
+            cmd += [flag, str(val)]
+    if cfg.get("conjoined_detection") is False:
+        cmd.append("--no-conjoined-detection")
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=60)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            return None
+        if proc.returncode != 0:
+            return None
+        stdout_text = (stdout_b or b"").decode(errors="replace").strip()
+        # --detect-only prints a single JSON line; take the last line in case
+        # anything else got interleaved onto stdout.
+        last_line = stdout_text.splitlines()[-1] if stdout_text else ""
+        data = json.loads(last_line)
+        if "error" in data:
+            return None
+        return data.get("boxes", [])
+    except Exception:
+        return None
+
+def _row_hits_any_box(y, boxes, pad=0):
+    for (x0, y0, x1, y1) in boxes:
+        if (y0 - pad) < y < (y1 + pad):
+            return True
+    return False
+
+def _find_bubble_safe_cut_row(boxes, target_y, search_window, min_y, max_y, pad=4):
+    """Finds the row nearest target_y that doesn't fall inside any bubble box
+    (with a small safety pad). Searches outward from target_y."""
+    if not _row_hits_any_box(target_y, boxes, pad):
+        return target_y
+    for delta in range(1, search_window + 1):
+        down = target_y + delta
+        up = target_y - delta
+        if down <= max_y and not _row_hits_any_box(down, boxes, pad):
+            return down
+        if up >= min_y and not _row_hits_any_box(up, boxes, pad):
+            return up
+    return None
+
+async def tile_tall_pages(input_dir, ordered_map, cfg=None):
+    from PIL import Image
+
+    cfg = cfg or {}
+    if cfg.get("tile_enabled") is False:
+        return {}
+
+    tile_height = cfg.get("tile_height") or MANHWA_TILE_HEIGHT
+    tile_search_radius = cfg.get("tile_search_radius") or MANHWA_TILE_OVERLAP
+    tile_trigger_height = cfg.get("tile_trigger_height") or MANHWA_TILE_TRIGGER_HEIGHT
+
+    manifest = {}
+    for idx, fname in list(ordered_map.items()):
+        path = os.path.join(input_dir, fname)
+        if not os.path.exists(path):
+            continue
+        with Image.open(path) as im:
+            width, height = im.size
+            if height <= tile_trigger_height:
+                continue
+
+            im = im.convert("RGB")
+
+            # Run the real bubble detector ONCE on the whole page so every
+            # candidate cut point can be checked against actual bubble
+            # locations instead of guessing from pixel statistics. If
+            # detection isn't available (older engine, timeout, error),
+            # boxes stays [] and cuts fall back to the plain target height -
+            # same as if tiling had a fixed height with no safety check.
+            boxes = await _detect_bubble_boxes(path, cfg)
+            if boxes is None:
+                boxes = []
+
+            tile_files = []
+            tile_heights = []
+            forced_cut_rows = []  # cuts that landed inside a bubble because no gap was found
+            y = 0
+            tile_n = 0
+            max_extend_attempts = 6
+            while y < height:
+                target_bottom = min(y + tile_height, height)
+                if target_bottom >= height:
+                    cut = height
+                    was_forced = False
+                else:
+                    cut = _find_bubble_safe_cut_row(boxes, target_bottom, tile_search_radius, y + 1, height - 1)
+                    was_forced = cut is None
+                    extended_target = target_bottom
+                    attempts = 0
+                    while cut is None and extended_target < height and attempts < max_extend_attempts:
+                        extended_target = min(extended_target + tile_search_radius, height)
+                        attempts += 1
+                        if extended_target >= height:
+                            cut = height
+                            was_forced = False
+                            break
+                        cut = _find_bubble_safe_cut_row(boxes, extended_target, tile_search_radius, y + 1, height - 1)
+                        if cut is not None:
+                            was_forced = False
+                    if cut is None:
+                        # Never found a gap between bubbles even after widening
+                        # the search - extremely dense bubble layout. Falling
+                        # back to the raw target here is the last resort; flag
+                        # it so recompose can double-check the seam.
+                        cut = target_bottom
+                        was_forced = True
+
+                if was_forced:
+                    forced_cut_rows.append(cut)
+
+                tile = im.crop((0, y, width, cut))
+                tile_name = f"{os.path.splitext(fname)[0]}_tile{tile_n:03d}.jpg"
+                tile.save(os.path.join(input_dir, tile_name), quality=95)
+                tile_files.append(tile_name)
+                tile_heights.append(cut - y)
+                tile_n += 1
+                if cut >= height:
+                    break
+                y = cut
+
+            manifest[idx] = {
+                "tiles": tile_files,
+                "heights": tile_heights,
+                "width": width,
+                "original_height": height,
+                "original_name": fname,
+                "forced_cut_rows": forced_cut_rows,
+            }
+        os.remove(path)
+    return manifest
+
+def _seam_looks_duplicated(recomposed_im, seam_y, band_px=SEAM_CHECK_BAND_PX, diff_threshold=SEAM_DUPLICATE_DIFF_THRESHOLD):
+    import numpy as np
+    width, height = recomposed_im.size
+    top = max(0, seam_y - band_px)
+    bottom = min(height, seam_y + band_px)
+    if bottom - top < band_px * 2:
+        return False
+    region = recomposed_im.crop((0, top, width, bottom)).convert("L")
+    arr = np.asarray(region, dtype=np.float32)
+    upper_band = arr[:band_px]
+    lower_band = arr[band_px:]
+    if upper_band.shape != lower_band.shape:
+        return False
+    diff = np.abs(upper_band - lower_band).mean()
+    return diff < diff_threshold
+
+def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None):
+    from PIL import Image
+    cfg = cfg or {}
+    seam_band_px = cfg.get("tile_seam_band_px") or SEAM_CHECK_BAND_PX
+    seam_diff_threshold = cfg.get("tile_seam_diff_threshold") or SEAM_DUPLICATE_DIFF_THRESHOLD
+
+    tiles = manifest_entry["tiles"]
+    heights = manifest_entry["heights"]
+    width = manifest_entry["width"]
+    total_height = manifest_entry["original_height"]
+    forced_cut_rows = set(manifest_entry.get("forced_cut_rows", []))
+
+    translated_tile_paths = []
+    for tile_name in tiles:
+        stem = os.path.splitext(tile_name)[0]
+        found = None
+        for ext in IMAGE_EXTS:
+            candidate = os.path.join(translated_dir, stem + ext)
+            if os.path.exists(candidate):
+                found = candidate
+                break
+        if found is None:
+            return None
+        translated_tile_paths.append(found)
+
+    recomposed = Image.new("RGB", (width, total_height), (255, 255, 255))
+    seam_ys = []
+    y_cursor = 0
+    for i, tile_path in enumerate(translated_tile_paths):
+        with Image.open(tile_path) as tile_im:
+            tile_im = tile_im.convert("RGB")
+            if tile_im.size != (width, heights[i]):
+                tile_im = tile_im.resize((width, heights[i]))
+            recomposed.paste(tile_im, (0, y_cursor))
+            y_cursor += tile_im.height
+            if i < len(translated_tile_paths) - 1:
+                seam_ys.append(y_cursor)
+
+    # Cuts were already chosen to dodge every detected bubble, so this is a
+    # secondary safety net (e.g. detection unavailable/missed something) -
+    # not the primary way bubbles get protected anymore.
+    flagged_seams = []
+    for seam_y in seam_ys:
+        was_forced = any(abs(seam_y - forced_y) <= 2 for forced_y in forced_cut_rows)
+        effective_threshold = seam_diff_threshold * (1.4 if was_forced else 1.0)
+        if _seam_looks_duplicated(recomposed, seam_y, band_px=seam_band_px, diff_threshold=effective_threshold):
+            flagged_seams.append(seam_y)
+
+    out_name = manifest_entry["original_name"]
+    out_path = os.path.join(translated_dir, out_name)
+    recomposed.save(out_path, quality=95)
+    for p in translated_tile_paths:
+        try:
+            os.remove(p)
+        except Exception:
+            pass
+    return (out_path, flagged_seams)
 
 def build_dynamic_system_instruction(cfg):
     system_text = cfg["system_prompt_text"].replace("{target_lang}", cfg["target_lang"])
@@ -1975,10 +2391,11 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             with open(manifest_cache_path) as mf:
                 cached = json.load(mf)
             ordered_map = {int(k): v for k, v in cached["ordered_map"].items()}
+            tile_manifest = {int(k): v for k, v in cached["tile_manifest"].items()} if cached.get("tile_manifest") else None
             # Deliberately NOT deleted here: if this file gets paused again
             # mid-translation, the next resume must still find this cache
-            # and reuse the same pages. It's cleaned up below once this file
-            # fully completes (or when job_root is wiped at job end/new job).
+            # and reuse the same pages/tiles. It's cleaned up below once this
+            # file fully completes (or when job_root is wiped at job end/new job).
         else:
             os.makedirs(input_dir, exist_ok=True)
 
@@ -2005,18 +2422,28 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             else:
                 shutil.move(downloaded_path, os.path.join(input_dir, os.path.basename(downloaded_path)))
 
-            ordered_map, _ = flatten_and_order(input_dir, content_type=cfg.get("content_type", "manhwa"), cfg=cfg)
+            await safe_edit(status_msg, build_status_text(mode_label, "🔍 Detecting bubbles for safe tile cuts", file_idx, total_files, 0, 0, 18))
+            ordered_map, tile_manifest = await flatten_and_order(input_dir, content_type=cfg.get("content_type", "manhwa"), cfg=cfg)
 
             # Cache so a future pause/resume of THIS file can skip straight
-            # back to here instead of re-extracting again.
+            # back to here instead of re-extracting/re-detecting again.
             with open(manifest_cache_path, "w") as mf:
-                json.dump({"file_idx": file_idx, "ordered_map": ordered_map}, mf)
+                json.dump({"file_idx": file_idx, "ordered_map": ordered_map, "tile_manifest": tile_manifest or {}}, mf)
 
         total_images = len(ordered_map)
 
         if total_images == 0:
             await safe_edit(status_msg, f"⚠️ File {file_idx}/{total_files}: no valid images found, skipping.")
             continue
+
+        if tile_manifest and not reuse_existing_pages:
+            tiled_pages = len(tile_manifest)
+            total_tiles = sum(len(v["tiles"]) for v in tile_manifest.values())
+            await safe_edit(
+                status_msg,
+                build_status_text(mode_label, f"✂️ Tiling {tiled_pages} tall page(s) into {total_tiles} bubble-safe tile(s)", file_idx, total_files, 0, total_images, 20)
+            )
+            total_images = len([f for f in os.listdir(input_dir) if f.lower().endswith(IMAGE_EXTS)])
 
         dynamic_system_instruction = build_dynamic_system_instruction(cfg)
 
@@ -2140,6 +2567,35 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
                 f"Skipping to next file."
             )
             continue
+
+        if tile_manifest:
+            await safe_edit(status_msg, build_status_text(mode_label, "🧵 Recomposing tiled pages", file_idx, total_files, total_images, total_images, 85))
+            recompose_failures = []
+            duplicate_suspected_pages = []
+            for page_idx, manifest_entry in tile_manifest.items():
+                result = recompose_tiled_page(file_translated_dir, page_idx, manifest_entry, cfg=cfg)
+                if result is None:
+                    recompose_failures.append(page_idx)
+                    continue
+                result_path, flagged_seams = result
+                if flagged_seams:
+                    duplicate_suspected_pages.append(page_idx)
+            if recompose_failures:
+                await safe_edit(
+                    status_msg,
+                    f"⚠️ File {file_idx}/{total_files}: {len(recompose_failures)} tiled page(s) "
+                    f"had a tile that failed to translate, so those pages may be incomplete. "
+                    f"Continuing with the rest."
+                )
+            if duplicate_suspected_pages:
+                pages_list = ", ".join(str(p) for p in duplicate_suspected_pages)
+                await safe_edit(
+                    status_msg,
+                    f"⚠️ File {file_idx}/{total_files}: possible duplicated content detected on "
+                    f"page(s) {pages_list} (seam had no clean bubble-free gap). "
+                    f"Please double-check these pages in the output."
+                )
+            produced_files = [f for f in os.listdir(file_translated_dir) if f.lower().endswith(IMAGE_EXTS)]
 
         try:
             if cfg['output_format'] == 'img':

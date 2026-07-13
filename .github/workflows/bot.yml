@@ -51,7 +51,7 @@ jobs:
       - name: Clone & Setup MangaTranslator Core
         run: |
           rm -rf MangaTranslator
-          git clone https://github.com/meangrinch/MangaTranslator.git
+          git clone https://github.com/mudassirsenpai-art/MangaTranslator.git
           cd MangaTranslator
           # PyTorch must be installed explicitly - it is NOT in requirements.txt
           # because it's hardware-specific (CPU/CUDA/ROCm/MPS).

@@ -1,4 +1,4 @@
-Name: MangaTranslator Bot Service
+name: MangaTranslator Bot Service
 
 on:
   workflow_dispatch:
@@ -53,7 +53,7 @@ jobs:
           DEPENDENCY_TOKEN: ${{ secrets.DEPENDENCY_TOKEN }}
         run: |
           rm -rf MangaTranslator
-          # Authenticating the private repo clone using your Fine-grained PAT
+          # Authenticating the private repo clone using your token
           git clone https://x-access-token:${DEPENDENCY_TOKEN}@github.com/mudassirsenpai-art/MangaTranslator.git
           cd MangaTranslator
           # PyTorch must be installed explicitly - it is NOT in requirements.txt

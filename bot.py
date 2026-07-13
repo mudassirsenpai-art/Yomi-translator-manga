@@ -62,9 +62,12 @@ CONTENT_TYPES = [
     ("💬 Comic (Western)", "comic"), ("📝 Novel (text only)", "novel"),
 ]
 
-MANHWA_TILE_HEIGHT = 1600
-MANHWA_TILE_OVERLAP = 700
-MANHWA_TILE_TRIGGER_HEIGHT = 2200
+# Tuned to cut far less often than before: most bubble/panel detectors handle
+# tiles up to ~3000-3500px fine, so there's no need to slice a 9000px strip into
+# 6 pieces. Fewer tiles = fewer seams = fewer chances of duplicated/misaligned art.
+MANHWA_TILE_HEIGHT = 3200
+MANHWA_TILE_OVERLAP = 400
+MANHWA_TILE_TRIGGER_HEIGHT = 3800
 MANHWA_SAFE_CUT_FLAT_THRESHOLD = 3.5
 
 DEFAULT_SYSTEM_PROMPT_NAME = "Default Localization Engine"
@@ -280,6 +283,13 @@ def kb_main_menu(cfg=None):
     if cfg is not None and cfg.get("content_type") == "manhwa":
         rows.append([InlineKeyboardButton("✂️ Tiling Settings", callback_data="menu_tiling")])
     rows += [
+        [InlineKeyboardButton("🧠 Generation Settings", callback_data="xf_group_generation")],
+        [InlineKeyboardButton("🧹 Cleaning & Upscaling", callback_data="xf_group_cleaning")],
+        [InlineKeyboardButton("⚙️ Batch & Performance", callback_data="xf_group_batch")],
+    ]
+    if cfg is not None and cfg.get("osb_enabled", True):
+        rows.append([InlineKeyboardButton("🫧 OSB Tuning", callback_data="xf_group_osb")])
+    rows += [
         [InlineKeyboardButton("⚙️ Provider & API", callback_data="menu_api")],
         [InlineKeyboardButton("📝 Prompt Library", callback_data="menu_prompt")],
         [InlineKeyboardButton("📦 Output Format", callback_data="menu_output")],
@@ -428,6 +438,199 @@ def kb_font_hinting_select(cfg):
 SEG_MODEL_OPTIONS = ["yolo", "sam2", "sam3"]
 BUBBLE_DETECTOR_OPTIONS = ["yolo_1", "yolo_2"]
 OCR_METHOD_OPTIONS = ["LLM", "manga-ocr", "paddleocr-vl"]
+TRANSLATION_MODE_OPTIONS = ["one-step", "two-step"]
+
+# ================= Value Validation (prevents invalid CLI args reaching main.py) =================
+# Mirrors the argparse `choices=[...]` in MangaTranslator/main.py. Any cfg value that
+# isn't in these sets (e.g. from a hand-edited or stale imported JSON file) gets
+# reset to None (= engine default) instead of being passed to the CLI and crashing
+# the whole job with "invalid choice: '...'".
+VALID_CHOICES = {
+    "translation_mode": set(TRANSLATION_MODE_OPTIONS),
+    "seg_model": set(SEG_MODEL_OPTIONS),
+    "bubble_detector_model": set(BUBBLE_DETECTOR_OPTIONS),
+    "ocr_method": set(OCR_METHOD_OPTIONS),
+    "reading_direction": {"rtl", "ltr"},
+    "reasoning_effort": {"xhigh", "high", "medium", "low", "minimal", "none"},
+    "effort": {"high", "medium", "low"},
+    "verbosity": {"high", "medium", "low"},
+    "media_resolution": {"auto", "high", "medium", "low"},
+    "media_resolution_bubbles": {"auto", "high", "medium", "low"},
+    "media_resolution_context": {"auto", "high", "medium", "low"},
+    "image_detail": {"auto", "original", "high", "low"},
+    "upscale_method": {"model", "model_lite", "lanczos", "none"},
+    "image_upscale_mode": {"off", "initial", "final"},
+    "osb_inpainting_method": {"flux_klein_9b", "flux_klein_4b", "flux_kontext", "opencv", "none"},
+    "osb_flux_backend": {"sdcpp", "sdnq", "nunchaku"},
+    "osb_flux_sdcpp_cache_mode": {"spectrum", "cache-dit", "taylorseer", "dbcache", "none"},
+    "osb_font_hinting": {"none", "slight", "normal", "full"},
+}
+
+def sanitize_cfg_values(cfg):
+    """Reset any cfg field to None (engine default) if it holds a value that isn't
+    a legal choice for that field's CLI flag. Returns [(field, bad_value), ...] that
+    were cleared, so the caller can tell the user exactly what was wrong."""
+    cleared = []
+    for field, allowed in VALID_CHOICES.items():
+        val = cfg.get(field)
+        if val is not None and val not in allowed:
+            cleared.append((field, val))
+            cfg[field] = None
+    return cleared
+
+# ================= Extended Settings Registry (auto-derived from main.py argparse) =================
+# Every field here mirrors an actual --flag in MangaTranslator/main.py exactly (type, default,
+# choices), so values entered through these menus can never desync from what the engine accepts.
+FIELD_REGISTRY = {
+    'temperature': {'group': 'generation', 'label': '🌡 Temperature', 'vtype': 'val', 'argtype': 'float', 'default': 0.1, 'choices': None, 'hint': '0.0-2.0'},
+    'top_p': {'group': 'generation', 'label': '🎯 Top P', 'vtype': 'val', 'argtype': 'float', 'default': 0.95, 'choices': None, 'hint': '0.0-1.0'},
+    'top_k': {'group': 'generation', 'label': '🔢 Top K', 'vtype': 'val', 'argtype': 'int', 'default': 1, 'choices': None, 'hint': 'positive integer'},
+    'max_tokens': {'group': 'generation', 'label': '📏 Max Tokens', 'vtype': 'val', 'argtype': 'int', 'default': None, 'choices': None, 'hint': '2048-32768'},
+    'use_custom_sampling': {'group': 'generation', 'label': '🎛 Custom Sampling', 'vtype': 'bool_invert', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'reasoning_effort': {'group': 'generation', 'label': '🧠 Reasoning Effort', 'vtype': 'val', 'argtype': 'str', 'default': 'medium', 'choices': ['xhigh', 'high', 'medium', 'low', 'minimal', 'none'], 'hint': None},
+    'effort': {'group': 'generation', 'label': '⚡ Effort', 'vtype': 'val', 'argtype': 'str', 'default': 'medium', 'choices': ['high', 'medium', 'low'], 'hint': None},
+    'verbosity': {'group': 'generation', 'label': '💬 Verbosity', 'vtype': 'val', 'argtype': 'str', 'default': 'low', 'choices': ['high', 'medium', 'low'], 'hint': None},
+    'reading_direction': {'group': 'generation', 'label': '↔️ Reading Direction', 'vtype': 'val', 'argtype': 'str', 'default': 'rtl', 'choices': ['rtl', 'ltr'], 'hint': None},
+    'enable_web_search': {'group': 'generation', 'label': '🌐 Web Search', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'enable_code_execution': {'group': 'generation', 'label': '💻 Code Execution', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'media_resolution': {'group': 'generation', 'label': '🖼 Media Resolution', 'vtype': 'val', 'argtype': 'str', 'default': 'auto', 'choices': ['auto', 'high', 'medium', 'low'], 'hint': None},
+    'media_resolution_bubbles': {'group': 'generation', 'label': '🫧 Media Resolution (Bubbles)', 'vtype': 'val', 'argtype': 'str', 'default': 'auto', 'choices': ['auto', 'high', 'medium', 'low'], 'hint': None},
+    'media_resolution_context': {'group': 'generation', 'label': '📄 Media Resolution (Context)', 'vtype': 'val', 'argtype': 'str', 'default': 'auto', 'choices': ['auto', 'high', 'medium', 'low'], 'hint': None},
+    'image_detail': {'group': 'generation', 'label': '🔍 Image Detail', 'vtype': 'val', 'argtype': 'str', 'default': 'auto', 'choices': ['auto', 'original', 'high', 'low'], 'hint': None},
+    'send_full_page_context': {'group': 'generation', 'label': '📃 Send Full Page Context', 'vtype': 'bool_invert', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'inpaint_colored_bubbles': {'group': 'cleaning', 'label': '🎨 Inpaint Colored Bubbles', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'use_otsu_threshold': {'group': 'cleaning', 'label': '⬜ Use Otsu Threshold', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'thresholding_value': {'group': 'cleaning', 'label': '🎚 Thresholding Value', 'vtype': 'val', 'argtype': 'int', 'default': 200, 'choices': None, 'hint': '0-255'},
+    'roi_shrink_px': {'group': 'cleaning', 'label': '📐 ROI Shrink (px)', 'vtype': 'val', 'argtype': 'int', 'default': 5, 'choices': None, 'hint': '0-10'},
+    'whiteout_conjoined_bubbles': {'group': 'cleaning', 'label': '⬜ Whiteout Conjoined Bubbles', 'vtype': 'bool_invert', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'upscale_method': {'group': 'cleaning', 'label': '⬆️ Upscale Method', 'vtype': 'val', 'argtype': 'str', 'default': 'model_lite', 'choices': ['model', 'model_lite', 'lanczos', 'none'], 'hint': None},
+    'image_upscale_mode': {'group': 'cleaning', 'label': '⬆️ Image Upscale Mode', 'vtype': 'val', 'argtype': None, 'default': 'off', 'choices': ['off', 'initial', 'final'], 'hint': None},
+    'image_upscale_factor': {'group': 'cleaning', 'label': '✖️ Image Upscale Factor', 'vtype': 'val', 'argtype': 'float', 'default': 2.0, 'choices': None, 'hint': '1.0-8.0'},
+    'jpeg_quality': {'group': 'cleaning', 'label': '🖼 JPEG Quality', 'vtype': 'val', 'argtype': 'int', 'default': 95, 'choices': None, 'hint': '1-100'},
+    'png_compression': {'group': 'cleaning', 'label': '🗜 PNG Compression', 'vtype': 'val', 'argtype': 'int', 'default': 2, 'choices': None, 'hint': '0-6'},
+    'auto_scale': {'group': 'cleaning', 'label': '📏 Auto Scale', 'vtype': 'bool_invert', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'bubble_min_side_pixels': {'group': 'cleaning', 'label': '🫧 Bubble Min Side (px)', 'vtype': 'val', 'argtype': 'int', 'default': 128, 'choices': None, 'hint': 'positive integer'},
+    'context_image_max_side_pixels': {'group': 'cleaning', 'label': '📄 Context Image Max Side (px)', 'vtype': 'val', 'argtype': 'int', 'default': 1024, 'choices': None, 'hint': 'positive integer'},
+    'parallel_requests': {'group': 'batch', 'label': '⚙️ Parallel Requests', 'vtype': 'val', 'argtype': 'int', 'default': 1, 'choices': None, 'hint': '1-20'},
+    'batch_parallel_within_pages': {'group': 'batch', 'label': '⚙️ Parallel Within Pages', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'batch_previous_context_images': {'group': 'batch', 'label': '🖼 Previous Context Images', 'vtype': 'val', 'argtype': 'int', 'default': 0, 'choices': None, 'hint': '0-10'},
+    'batch_previous_context_texts': {'group': 'batch', 'label': '📝 Previous Context Texts', 'vtype': 'val', 'argtype': 'int', 'default': 3, 'choices': None, 'hint': '0-50'},
+    'verbose': {'group': 'batch', 'label': '🔊 Verbose Logging', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'cpu': {'group': 'batch', 'label': '🖥 Force CPU', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'cleaning_only': {'group': 'batch', 'label': '🧹 Cleaning Only', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'upscaling_only': {'group': 'batch', 'label': '⬆️ Upscaling Only', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'test_mode': {'group': 'batch', 'label': '🧪 Test Mode', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'osb_inpainting_method': {'group': 'osb', 'label': '🎨 OSB Inpainting Method', 'vtype': 'val', 'argtype': 'str', 'default': 'flux_klein_4b', 'choices': ['flux_klein_9b', 'flux_klein_4b', 'flux_kontext', 'opencv', 'none'], 'hint': None},
+    'osb_flux_backend': {'group': 'osb', 'label': '⚙️ OSB Flux Backend', 'vtype': 'val', 'argtype': 'str', 'default': 'sdnq', 'choices': ['sdcpp', 'sdnq', 'nunchaku'], 'hint': None},
+    'osb_flux_low_vram': {'group': 'osb', 'label': '💾 OSB Flux Low VRAM', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'osb_flux_sdcpp_cache_mode': {'group': 'osb', 'label': '💾 OSB Flux SDCPP Cache Mode', 'vtype': 'val', 'argtype': 'str', 'default': 'none', 'choices': ['spectrum', 'cache-dit', 'taylorseer', 'dbcache', 'none'], 'hint': None},
+    'osb_flux_sdcpp_diffusion_quant': {'group': 'osb', 'label': '🔢 OSB Flux SDCPP Diffusion Quant', 'vtype': 'val', 'argtype': 'str', 'default': 'Q4_K_M', 'choices': None, 'hint': 'text, e.g. Q4_K_M'},
+    'osb_flux_sdcpp_text_encoder_quant': {'group': 'osb', 'label': '🔢 OSB Flux SDCPP Text Encoder Quant', 'vtype': 'val', 'argtype': 'str', 'default': None, 'choices': None, 'hint': 'text'},
+    'osb_flux_upscale_small_crops': {'group': 'osb', 'label': '⬆️ OSB Flux Upscale Small Crops', 'vtype': 'bool_invert', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'osb_flux_group_regions': {'group': 'osb', 'label': '🧩 OSB Flux Group Regions', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'osb_flux_steps': {'group': 'osb', 'label': '🔁 OSB Flux Steps', 'vtype': 'val', 'argtype': 'int', 'default': 4, 'choices': None, 'hint': 'positive integer'},
+    'osb_flux_luminance_correction': {'group': 'osb', 'label': '💡 OSB Flux Luminance Correction', 'vtype': 'bool_invert', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'osb_flux_residual_threshold': {'group': 'osb', 'label': '🎚 OSB Flux Residual Threshold', 'vtype': 'val', 'argtype': 'float', 'default': 0.15, 'choices': None, 'hint': 'decimal'},
+    'osb_seed': {'group': 'osb', 'label': '🌱 OSB Seed', 'vtype': 'val', 'argtype': 'int', 'default': 1, 'choices': None, 'hint': 'integer'},
+    'osb_max_font_size': {'group': 'osb', 'label': '🔠 OSB Max Font Size (px)', 'vtype': 'val', 'argtype': 'int', 'default': 64, 'choices': None, 'hint': 'positive integer'},
+    'osb_min_font_size': {'group': 'osb', 'label': '🔡 OSB Min Font Size (px)', 'vtype': 'val', 'argtype': 'int', 'default': 10, 'choices': None, 'hint': 'positive integer'},
+    'osb_use_ligatures': {'group': 'osb', 'label': '🔗 OSB Ligatures', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'osb_outline_width': {'group': 'osb', 'label': '⭕ OSB Outline Width', 'vtype': 'val', 'argtype': 'float', 'default': 3.0, 'choices': None, 'hint': 'decimal'},
+    'osb_line_spacing': {'group': 'osb', 'label': '📏 OSB Line Spacing', 'vtype': 'val', 'argtype': 'float', 'default': 1.0, 'choices': None, 'hint': 'decimal'},
+    'osb_use_subpixel': {'group': 'osb', 'label': '🖥 OSB Subpixel Rendering', 'vtype': 'bool_true', 'argtype': None, 'default': True, 'choices': None, 'hint': None},
+    'osb_font_hinting': {'group': 'osb', 'label': '🔎 OSB Font Hinting', 'vtype': 'val', 'argtype': 'str', 'default': 'none', 'choices': ['none', 'slight', 'normal', 'full'], 'hint': None},
+    'osb_bbox_expansion': {'group': 'osb', 'label': '📦 OSB Bbox Expansion', 'vtype': 'val', 'argtype': 'float', 'default': 0.1, 'choices': None, 'hint': 'decimal'},
+    'osb_render_expansion_narrow': {'group': 'osb', 'label': '↔️ OSB Render Expansion (Narrow)', 'vtype': 'val', 'argtype': 'float', 'default': 1.0, 'choices': None, 'hint': 'decimal'},
+    'osb_render_expansion_tiny': {'group': 'osb', 'label': '🔬 OSB Render Expansion (Tiny)', 'vtype': 'val', 'argtype': 'float', 'default': 1.0, 'choices': None, 'hint': 'decimal'},
+    'osb_render_expansion_aspect_threshold': {'group': 'osb', 'label': '📐 OSB Aspect Threshold', 'vtype': 'val', 'argtype': 'float', 'default': 0.4, 'choices': None, 'hint': 'decimal'},
+    'osb_render_expansion_area_threshold': {'group': 'osb', 'label': '📐 OSB Area Threshold', 'vtype': 'val', 'argtype': 'float', 'default': 0.005, 'choices': None, 'hint': 'decimal'},
+    'osb_text_box_proximity_ratio': {'group': 'osb', 'label': '📏 OSB Text Box Proximity Ratio', 'vtype': 'val', 'argtype': 'float', 'default': 0.02, 'choices': None, 'hint': 'decimal'},
+    'osb_confidence': {'group': 'osb', 'label': '🎯 OSB Confidence', 'vtype': 'val', 'argtype': 'float', 'default': 0.6, 'choices': None, 'hint': '0.0-1.0'},
+    'osb_filter_page_numbers': {'group': 'osb', 'label': '🔢 OSB Filter Page Numbers', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'osb_page_filter_margin': {'group': 'osb', 'label': '📐 OSB Page Filter Margin', 'vtype': 'val', 'argtype': 'float', 'default': 0.1, 'choices': None, 'hint': 'decimal'},
+    'osb_page_filter_min_area': {'group': 'osb', 'label': '📐 OSB Page Filter Min Area', 'vtype': 'val', 'argtype': 'float', 'default': 0.05, 'choices': None, 'hint': 'decimal'},
+    'osb_min_area_ignore_ratio': {'group': 'osb', 'label': '📐 OSB Min Area Ignore Ratio', 'vtype': 'val', 'argtype': 'float', 'default': 0.0, 'choices': None, 'hint': 'decimal'},
+    'osb_min_side_pixels': {'group': 'osb', 'label': '🫧 OSB Min Side (px)', 'vtype': 'val', 'argtype': 'int', 'default': 128, 'choices': None, 'hint': 'positive integer'},
+}
+
+FIELD_GROUPS = {
+    'generation': ['temperature', 'top_p', 'top_k', 'max_tokens', 'use_custom_sampling', 'reasoning_effort', 'effort', 'verbosity', 'reading_direction', 'enable_web_search', 'enable_code_execution', 'media_resolution', 'media_resolution_bubbles', 'media_resolution_context', 'image_detail', 'send_full_page_context'],
+    'cleaning': ['inpaint_colored_bubbles', 'use_otsu_threshold', 'thresholding_value', 'roi_shrink_px', 'whiteout_conjoined_bubbles', 'upscale_method', 'image_upscale_mode', 'image_upscale_factor', 'jpeg_quality', 'png_compression', 'auto_scale', 'bubble_min_side_pixels', 'context_image_max_side_pixels'],
+    'batch': ['parallel_requests', 'batch_parallel_within_pages', 'batch_previous_context_images', 'batch_previous_context_texts', 'verbose', 'cpu', 'cleaning_only', 'upscaling_only', 'test_mode'],
+    'osb': ['osb_inpainting_method', 'osb_flux_backend', 'osb_flux_low_vram', 'osb_flux_sdcpp_cache_mode', 'osb_flux_sdcpp_diffusion_quant', 'osb_flux_sdcpp_text_encoder_quant', 'osb_flux_upscale_small_crops', 'osb_flux_group_regions', 'osb_flux_steps', 'osb_flux_luminance_correction', 'osb_flux_residual_threshold', 'osb_seed', 'osb_max_font_size', 'osb_min_font_size', 'osb_use_ligatures', 'osb_outline_width', 'osb_line_spacing', 'osb_use_subpixel', 'osb_font_hinting', 'osb_bbox_expansion', 'osb_render_expansion_narrow', 'osb_render_expansion_tiny', 'osb_render_expansion_aspect_threshold', 'osb_render_expansion_area_threshold', 'osb_text_box_proximity_ratio', 'osb_confidence', 'osb_filter_page_numbers', 'osb_page_filter_margin', 'osb_page_filter_min_area', 'osb_min_area_ignore_ratio', 'osb_min_side_pixels'],
+}
+
+FIELD_GROUP_TITLES = {
+    "generation": "🧠 Generation Settings",
+    "cleaning": "🧹 Cleaning & Upscaling",
+    "batch": "⚙️ Batch & Performance",
+    "osb": "🫧 OSB (Outside-Bubble Text) Tuning",
+}
+
+# ================= Generic Extended-Settings UI (data-driven from FIELD_REGISTRY) =================
+def _fmt_field_value(key):
+    meta = FIELD_REGISTRY[key]
+    def _get(cfg):
+        v = cfg.get(key)
+        if v is None:
+            d = meta["default"]
+            return f"Original/Default ({d})" if d is not None else "Original/Default"
+        return str(v)
+    return _get
+
+def kb_field_group_menu(cfg, group):
+    keys = FIELD_GROUPS[group]
+    rows = []
+    for key in keys:
+        meta = FIELD_REGISTRY[key]
+        val = cfg.get(key)
+        if meta["vtype"] in ("bool_true", "bool_invert"):
+            if val is None:
+                shown = "Original/Default"
+            else:
+                shown = "✅ On" if val else "❌ Off"
+        elif meta["choices"]:
+            shown = val if val is not None else f"Original/Default ({meta['default']})"
+        else:
+            shown = val if val is not None else f"Original/Default ({meta['default']})" if meta["default"] is not None else "Original/Default"
+        rows.append([InlineKeyboardButton(f"{meta['label']}: {shown}", callback_data=f"xf_open_{group}_{key}")])
+    rows.append([InlineKeyboardButton("♻️ Reset Group to Original/Default", callback_data=f"xf_reset_{group}")])
+    rows.append([InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")])
+    return InlineKeyboardMarkup(rows)
+
+def kb_field_bool_select(cfg, key):
+    meta = FIELD_REGISTRY[key]
+    val = cfg.get(key)
+    def mark(v): return "✅ " if val == v else ""
+    rows = [
+        [InlineKeyboardButton(f"{mark(True)}On", callback_data=f"xfboolset_{key}_on")],
+        [InlineKeyboardButton(f"{mark(False)}Off", callback_data=f"xfboolset_{key}_off")],
+        [InlineKeyboardButton(f"{'✅ ' if val is None else ''}Original/Default", callback_data=f"xfboolset_{key}_default")],
+        [InlineKeyboardButton("🔙 Back", callback_data=f"xf_group_{meta['group']}")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+def kb_field_choice_select(cfg, key):
+    meta = FIELD_REGISTRY[key]
+    current = cfg.get(key)
+    rows = []
+    for opt in meta["choices"]:
+        mark = "✅ " if current == opt else ""
+        rows.append([InlineKeyboardButton(f"{mark}{opt}", callback_data=f"xfchoiceset_{key}::{opt}")])
+    default_disp = meta["default"] if meta["default"] is not None else "engine default"
+    rows.append([InlineKeyboardButton(f"{'✅ ' if current is None else ''}Original/Default ({default_disp})", callback_data=f"xfchoiceset_{key}::__default__")])
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data=f"xf_group_{meta['group']}")])
+    return InlineKeyboardMarkup(rows)
+
+async def open_field_editor(query, cfg, group, key):
+    meta = FIELD_REGISTRY[key]
+    if meta["vtype"] in ("bool_true", "bool_invert"):
+        await safe_edit(query.message, f"{meta['label']}:", reply_markup=kb_field_bool_select(cfg, key))
+        return True
+    if meta["choices"]:
+        await safe_edit(query.message, f"{meta['label']}:", reply_markup=kb_field_choice_select(cfg, key))
+        return True
+    return False  # numeric/text field -> caller sets awaiting_reply and prompts
 
 def _detect_val_label(cfg, field, default_display):
     v = cfg.get(field)
@@ -443,6 +646,8 @@ def kb_detection_menu(cfg):
     conj_det = cfg.get("conjoined_detection")
     conj_det_label = "Original/Default (On)" if conj_det is None else ("✅ On" if conj_det else "❌ Off")
 
+    trans_mode = _detect_val_label(cfg, "translation_mode", "one-step")
+
     rows = [
         [InlineKeyboardButton(f"🎯 Bubble Confidence: {conf}", callback_data="detect_field_confidence")],
         [InlineKeyboardButton(f"🔗 Conjoined Confidence: {conj_conf}", callback_data="detect_field_conjoined_confidence")],
@@ -451,9 +656,21 @@ def kb_detection_menu(cfg):
         [InlineKeyboardButton(f"🧠 Segmentation Model: {seg}", callback_data="detect_seg_open")],
         [InlineKeyboardButton(f"🫧 Bubble Detector Model: {bubble_model}", callback_data="detect_bubblemodel_open")],
         [InlineKeyboardButton(f"👁 OCR Method: {ocr}", callback_data="detect_ocr_open")],
+        [InlineKeyboardButton(f"🔀 Translation Mode: {trans_mode}", callback_data="detect_transmode_open")],
         [InlineKeyboardButton("♻️ Reset All to Original/Default", callback_data="detect_reset_all")],
         [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")],
     ]
+    return InlineKeyboardMarkup(rows)
+
+def kb_translation_mode_select(cfg):
+    current = cfg.get("translation_mode")
+    rows = []
+    for opt in TRANSLATION_MODE_OPTIONS:
+        mark = "✅ " if current == opt else ""
+        label = f"{opt} (combines OCR/Translate)" if opt == "one-step" else f"{opt} (separates OCR/Translate — better for weaker LLMs)"
+        rows.append([InlineKeyboardButton(f"{mark}{label}", callback_data=f"transmodeset_{opt}")])
+    rows.append([InlineKeyboardButton(f"{'✅ ' if current is None else ''}Original/Default (one-step)", callback_data="transmodeset_default")])
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data="menu_detection")])
     return InlineKeyboardMarkup(rows)
 
 def kb_detect_bool_select(cfg, field):
@@ -1090,10 +1307,22 @@ async def handle_callbacks(client, query: CallbackQuery):
         await safe_edit(query.message, "👁 **OCR Method:**", reply_markup=kb_ocr_method_select(cfg))
         return
 
+    if data == "detect_transmode_open":
+        await safe_edit(query.message, "🔀 **Translation Mode:**", reply_markup=kb_translation_mode_select(cfg))
+        return
+
+    if data.startswith("transmodeset_"):
+        choice = data.split("_", 1)[1]
+        cfg["translation_mode"] = None if choice == "default" else choice
+        await save_user_config(user_id)
+        await safe_answer(query, "Translation mode updated")
+        await safe_edit(query.message, "🔀 **Translation Mode:**", reply_markup=kb_translation_mode_select(cfg))
+        return
+
     if data == "detect_reset_all":
         for field in (
             "confidence", "conjoined_confidence", "panel_confidence", "seg_model",
-            "conjoined_detection", "bubble_detector_model", "ocr_method",
+            "conjoined_detection", "bubble_detector_model", "ocr_method", "translation_mode",
         ):
             cfg[field] = None
         await save_user_config(user_id)
@@ -1104,6 +1333,60 @@ async def handle_callbacks(client, query: CallbackQuery):
             reply_markup=kb_detection_menu(cfg)
         )
         return
+    # ---- Extended settings: group menu open ----
+    if data.startswith("xf_group_"):
+        group = data[len("xf_group_"):]
+        title = FIELD_GROUP_TITLES.get(group, group)
+        await safe_edit(query.message, f"{title}\nTap a setting to change it.", reply_markup=kb_field_group_menu(cfg, group))
+        return
+
+    # ---- Extended settings: open a specific field editor ----
+    if data.startswith("xf_open_"):
+        rest = data[len("xf_open_"):]
+        group, key = rest.split("_", 1)
+        handled = await open_field_editor(query, cfg, group, key)
+        if not handled:
+            meta = FIELD_REGISTRY[key]
+            awaiting_reply[user_id] = {"type": "xf_field", "extra": {"key": key}}
+            hint = meta["hint"] or ("a whole number" if meta["argtype"] == "int" else "a decimal number" if meta["argtype"] == "float" else "text")
+            await safe_edit(
+                query.message,
+                f"✍️ **Reply to this message with the new {meta['label']}** ({hint}).\n"
+                f"Reply with `default` to reset to Original/Default."
+            )
+        return
+
+    # ---- Extended settings: bool set ----
+    if data.startswith("xfboolset_"):
+        rest = data[len("xfboolset_"):]
+        key, choice = rest.rsplit("_", 1)
+        cfg[key] = None if choice == "default" else (choice == "on")
+        await save_user_config(user_id)
+        await safe_answer(query, "Updated")
+        await safe_edit(query.message, f"{FIELD_REGISTRY[key]['label']}:", reply_markup=kb_field_bool_select(cfg, key))
+        return
+
+    # ---- Extended settings: choice set ----
+    if data.startswith("xfchoiceset_"):
+        rest = data[len("xfchoiceset_"):]
+        key, choice = rest.split("::", 1)
+        cfg[key] = None if choice == "__default__" else choice
+        await save_user_config(user_id)
+        await safe_answer(query, "Updated")
+        await safe_edit(query.message, f"{FIELD_REGISTRY[key]['label']}:", reply_markup=kb_field_choice_select(cfg, key))
+        return
+
+    # ---- Extended settings: reset whole group ----
+    if data.startswith("xf_reset_"):
+        group = data[len("xf_reset_"):]
+        for key in FIELD_GROUPS[group]:
+            cfg[key] = None
+        await save_user_config(user_id)
+        await safe_answer(query, "Group reset to Original/Default")
+        title = FIELD_GROUP_TITLES.get(group, group)
+        await safe_edit(query.message, f"{title}\nAll settings in this group reset to Original/Default.", reply_markup=kb_field_group_menu(cfg, group))
+        return
+
 
     if data == "menu_tiling":
         await safe_edit(
@@ -1286,8 +1569,15 @@ async def receive_files(client, message: Message):
             try:
                 with open(dest, "r") as f:
                     imported = json.load(f)
+            except json.JSONDecodeError as e:
+                await message.reply_text(
+                    f"❌ Invalid JSON — not imported.\n"
+                    f"{e.msg} at line {e.lineno}, column {e.colno} (char {e.pos}).\n"
+                    f"Fix the file and re-upload; nothing was changed."
+                )
+                return
             except Exception as e:
-                await message.reply_text(f"❌ Couldn't parse that JSON file: `{e}`")
+                await message.reply_text(f"❌ Couldn't read that file: {e}\nNothing was imported.")
                 return
 
         if not isinstance(imported, dict):
@@ -1296,16 +1586,28 @@ async def receive_files(client, message: Message):
 
         awaiting_reply.pop(user_id, None)
         merged = default_config()
-        merged.update(imported)
+        unknown_keys = [k for k in imported.keys() if k not in merged]
+        known_imported = {k: v for k, v in imported.items() if k in merged}
+        merged.update(known_imported)
+        cleared = sanitize_cfg_values(merged)
         user_settings[str(user_id)] = merged
         await save_user_config(user_id)
         cfg = get_user_config(user_id)
-        await message.reply_text(
-            "✅ **Settings imported and applied.**\n"
-            "Note: fonts and prompt library text referenced by name still need "
-            "to exist in this bot's library — re-upload/re-add them if missing.",
-            reply_markup=kb_main_menu(cfg)
+        report_lines = ["✅ **Settings imported and applied.**"]
+        if cleared:
+            report_lines.append("\n⚠️ **Invalid values were reset to default:**")
+            for field, bad_value in cleared:
+                allowed = ", ".join(sorted(VALID_CHOICES[field]))
+                report_lines.append(f"• `{field}` = `{bad_value}` → not a valid choice (allowed: {allowed})")
+        if unknown_keys:
+            shown = ", ".join(unknown_keys[:10])
+            more = " ..." if len(unknown_keys) > 10 else ""
+            report_lines.append(f"\nℹ️ Ignored {len(unknown_keys)} unrecognized key(s): `{shown}`{more}")
+        report_lines.append(
+            "\nNote: fonts and prompt library text referenced by name still need "
+            "to exist in this bot's library — re-upload/re-add them if missing."
         )
+        await message.reply_text("\n".join(report_lines), reply_markup=kb_main_menu(cfg))
         return
 
     queue = pending_files.get(user_id)
@@ -1418,6 +1720,38 @@ async def handle_reply_capture(client, message: Message):
         awaiting_reply.pop(user_id, None)
         await message.reply_text(f"✅ {pretty} set to `{value}`.", reply_markup=back_kb)
         return
+    if kind == "xf_field":
+        key = pending_reply["extra"]["key"]
+        meta = FIELD_REGISTRY[key]
+        group = meta["group"]
+        back_kb = kb_field_group_menu(cfg, group)
+
+        if text.lower() == "default":
+            cfg[key] = None
+            await save_user_config(user_id)
+            awaiting_reply.pop(user_id, None)
+            await message.reply_text(f"✅ {meta['label']} reset to Original/Default.", reply_markup=back_kb)
+            return
+
+        argtype = meta["argtype"]
+        try:
+            if argtype == "int":
+                value = int(text)
+            elif argtype == "float":
+                value = float(text)
+            else:
+                value = text
+        except ValueError:
+            hint = meta["hint"] or ("a whole number" if argtype == "int" else "a decimal number")
+            await message.reply_text(f"❌ Please reply with {hint}, or `default` to reset. Try again.")
+            return
+
+        cfg[key] = value
+        await save_user_config(user_id)
+        awaiting_reply.pop(user_id, None)
+        await message.reply_text(f"✅ {meta['label']} set to `{value}`.", reply_markup=back_kb)
+        return
+
 
     if kind == "detect_field":
         field = pending_reply["extra"]["field"]
@@ -1696,22 +2030,39 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
 
             tile_files = []
             tile_heights = []
-            forced_cut_rows = []  
+            forced_cut_rows = []  # cuts that landed on non-flat (likely mid-art/mid-bubble) rows
             y = 0
             tile_n = 0
+            max_extend_attempts = 6  # cap the widening search so we don't loop forever on noisy art
             while y < height:
                 target_bottom = min(y + tile_height, height)
                 if target_bottom >= height:
                     cut = height
+                    was_forced = False
                 else:
                     cut = _find_safe_cut_row(row_flatness, target_bottom, search_window, y + 1, height - 1, tile_flat_threshold)
+                    was_forced = cut is None
                     extended_target = target_bottom
-                    while cut is None and extended_target < height:
+                    attempts = 0
+                    while cut is None and extended_target < height and attempts < max_extend_attempts:
                         extended_target = min(extended_target + tile_search_radius, height)
+                        attempts += 1
                         if extended_target >= height:
                             cut = height
+                            was_forced = False  # cutting at the true bottom of the strip is fine
                             break
                         cut = _find_safe_cut_row(row_flatness, extended_target, search_window, y + 1, height - 1, tile_flat_threshold)
+                        if cut is not None:
+                            was_forced = False
+                    if cut is None:
+                        # Never found a flat row even after widening the search — fall back to
+                        # the original target and flag it, since this cut may slice through
+                        # a bubble/panel and cause duplicated or clipped content at the seam.
+                        cut = target_bottom
+                        was_forced = True
+
+                if was_forced:
+                    forced_cut_rows.append(cut)
 
                 tile = im.crop((0, y, width, cut))
                 tile_name = f"{os.path.splitext(fname)[0]}_tile{tile_n:03d}.jpg"
@@ -1791,11 +2142,16 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None):
             if i < len(translated_tile_paths) - 1:
                 seam_ys.append(y_cursor)
 
+    # Check every seam for duplicated/misaligned content, not just seams that were
+    # forced through non-flat rows. Even a "safe" flat-row cut can look duplicated
+    # after inpainting/redrawing shifts art slightly, so this can't be skipped —
+    # forced cuts just get a slightly wider tolerance since they're higher-risk.
     flagged_seams = []
     for seam_y in seam_ys:
-        if any(abs(seam_y - forced_y) <= 2 for forced_y in forced_cut_rows):
-            if _seam_looks_duplicated(recomposed, seam_y, band_px=seam_band_px, diff_threshold=seam_diff_threshold):
-                flagged_seams.append(seam_y)
+        was_forced = any(abs(seam_y - forced_y) <= 2 for forced_y in forced_cut_rows)
+        effective_threshold = seam_diff_threshold * (1.4 if was_forced else 1.0)
+        if _seam_looks_duplicated(recomposed, seam_y, band_px=seam_band_px, diff_threshold=effective_threshold):
+            flagged_seams.append(seam_y)
 
     out_name = manifest_entry["original_name"]
     out_path = os.path.join(translated_dir, out_name)
@@ -2013,6 +2369,19 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             cmd.append("--osb-enable")
             if cli_supports_flag("--osb-font-dir"):
                 cmd += ["--osb-font-dir", font_dir_for_run]
+
+        # SAFETY NET: strip any choice-restricted field holding an invalid value
+        # (e.g. a stale/hand-edited translation_mode like "contextual") before it
+        # can reach main.py's argparse and abort the whole job with "invalid choice".
+        last_minute_cleared = sanitize_cfg_values(cfg)
+        if last_minute_cleared:
+            await save_user_config(user_id)
+            bad_list = ", ".join(f"{f}='{v}'" for f, v in last_minute_cleared)
+            await safe_edit(
+                status_msg,
+                f"⚠️ Corrected invalid setting(s) before running: {bad_list} "
+                f"(reset to engine default). Continuing..."
+            )
 
         # INJECT ALL CUSTOM PARAMETERS
         for key, config_meta in CLI_MAPPINGS.items():

@@ -6,6 +6,7 @@ import shutil
 import zipfile
 import asyncio
 import subprocess
+import io
 from pathlib import Path
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
@@ -25,7 +26,6 @@ AUTHORIZED_USERS = [int(u.strip()) for u in AUTH_USERS_STR.split(",") if u.strip
 app = Client("YomiTranslatorBot", bot_token=BOT_TOKEN, api_id=API_ID, api_hash=API_HASH)
 
 # ================= Persistent Storage Paths =================
-# These stay inside the repo on the runner, so the font/prompt library gets committed and persists.
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "bot_data"
 FONTS_DIR = DATA_DIR / "fonts"
@@ -37,87 +37,38 @@ for d in [DATA_DIR, FONTS_DIR, PROMPTS_DIR]:
 
 # ================= Language Catalogs =================
 SOURCE_LANGS = [
-    ("Auto Detect", "auto"),
-    ("Japanese", "ja"),
-    ("Korean", "ko"),
-    ("English", "en"),
-    ("Chinese", "zh"),
+    ("Auto Detect", "auto"), ("Japanese", "ja"), ("Korean", "ko"),
+    ("English", "en"), ("Chinese", "zh"),
 ]
 
 TARGET_LANGS = [
-    ("English", "English"),
-    ("Hindi (Roman)", "Roman Hindi"),
-    ("Urdu (Roman)", "Roman Urdu"),
-    ("Urdu", "Urdu"),
-    ("Hindi", "Hindi"),
-    ("French", "French"),
-    ("Spanish", "Spanish"),
+    ("English", "English"), ("Hindi (Roman)", "Roman Hindi"), ("Urdu (Roman)", "Roman Urdu"),
+    ("Urdu", "Urdu"), ("Hindi", "Hindi"), ("French", "French"), ("Spanish", "Spanish"),
 ]
 
-PROVIDERS = ["Gemini", "Anthropic", "OpenAI", "OpenAI-Compatible"]
+PROVIDERS = ["Google", "Gemini", "Anthropic", "OpenAI", "xAI", "DeepSeek", "Z.ai", "Moonshot AI", "Xiaomi MiMo", "OpenRouter", "OpenAI-Compatible"]
 
 OUTPUT_FORMATS = [
-    ("ZIP Package", "zip"),
-    ("CBZ Archive", "cbz"),
-    ("PDF Document", "pdf"),
-    ("Raw Images", "img"),
+    ("ZIP Package", "zip"), ("CBZ Archive", "cbz"),
+    ("PDF Document", "pdf"), ("Raw Images", "img"),
 ]
 
 UPLOAD_MODES = [
-    ("🖼 Raw Images", "raw"),
-    ("📦 ZIP / CBZ", "archive"),
-    ("📄 PDF", "pdf"),
+    ("🖼 Raw Images", "raw"), ("📦 ZIP / CBZ", "archive"), ("📄 PDF", "pdf"),
 ]
 
-# ================= Content Type Profiles =================
-# Different source formats need fundamentally different processing:
-#  - Manhwa: long vertical-scroll strips, often delivered as sliced fragments
-#    (001__001.jpg, 001__002.jpg...). After stitching, a single page can be
-#    10,000+ px tall, which crushes YOLO speech-bubble detection since the
-#    detector resizes the image down to its fixed input resolution (e.g.
-#    640-1280px) - bubbles become sub-pixel and vanish. Fix: tile the tall
-#    page into overlapping detection-sized windows, run the translator per
-#    tile, then recompose.
-#  - Manga/Comic: normal single-page images/spreads, no tiling needed -
-#    default single-page pipeline as-is.
-#  - Novel: text-heavy prose, no speech bubbles or panel art at all. Image
-#    pipeline (detection/cleaning/rendering) is actively wrong here - it
-#    would try to detect bubbles that don't exist. This mode should route to
-#    a plain OCR + translate pass without the bubble/render stages.
 CONTENT_TYPES = [
-    ("🍥 Manhwa (long strip)", "manhwa"),
-    ("📖 Manga (page-by-page)", "manga"),
-    ("💬 Comic (Western)", "comic"),
-    ("📝 Novel (text only)", "novel"),
+    ("🍥 Manhwa (long strip)", "manhwa"), ("📖 Manga (page-by-page)", "manga"),
+    ("💬 Comic (Western)", "comic"), ("📝 Novel (text only)", "novel"),
 ]
 
-# Tiling parameters for long-strip Manhwa. Tiles target roughly TILE_HEIGHT
-# tall, but the actual cut point is snapped to the nearest "safe" (blank/flat)
-# row within +/- MANHWA_TILE_SEARCH_RADIUS px, so a cut never lands in the
-# middle of a speech bubble or dense artwork. See tile_tall_pages().
-MANHWA_TILE_HEIGHT = 1600
-# Search radius for a safe cut row around the target line. Widened further so
-# the search has a much better chance of finding genuinely blank background
-# instead of running out of room and falling through to the extend/force path.
-MANHWA_TILE_OVERLAP = 700  # reused as the safe-cut search radius (+/- px)
-# Only kick in tiling once a stitched page exceeds this height - short
-# Manhwa pages behave fine as a single image and tiling would just add
-# unnecessary subprocess calls.
-MANHWA_TILE_TRIGGER_HEIGHT = 2200
-# A row must be this flat (low std-dev) to count as a safe cut line. Kept
-# strict - a cut is only ever accepted on rows that are truly blank
-# background, not just low-contrast art, which is what let cuts land close
-# enough to bubble/art edges to visibly slice through them.
+# Tuned to cut far less often than before: most bubble/panel detectors handle
+# tiles up to ~3000-3500px fine, so there's no need to slice a 9000px strip into
+# 6 pieces. Fewer tiles = fewer seams = fewer chances of duplicated/misaligned art.
+MANHWA_TILE_HEIGHT = 3200
+MANHWA_TILE_OVERLAP = 400
+MANHWA_TILE_TRIGGER_HEIGHT = 3800
 MANHWA_SAFE_CUT_FLAT_THRESHOLD = 3.5
-# If no row in the search window clears the flatness threshold, the tile
-# target is pushed further down in MANHWA_TILE_OVERLAP-sized steps and the
-# search runs again - see _find_safe_cut_row / tile_tall_pages. There is
-# intentionally NO hard ceiling on how far this can extend: a tile that ends
-# up taller than planned is always safer than a forced cut through the
-# middle of artwork or a speech bubble. In the extreme case where a page has
-# no confirmed-safe row anywhere below the current position, the tile simply
-# extends all the way to the bottom of the page (i.e. tiling silently no-ops
-# for that page and it gets translated as one piece) rather than guessing.
 
 DEFAULT_SYSTEM_PROMPT_NAME = "Default Localization Engine"
 DEFAULT_SYSTEM_PROMPT_TEXT = (
@@ -148,9 +99,9 @@ def _save_all_settings(data):
     USERS_FILE.write_text(json.dumps(data, indent=2))
 
 user_settings = _load_all_settings()
-pending_files = {}   # user_id -> {"mode": "raw"/"archive"/"pdf", "files": [Message,...], "collecting": bool}
-active_jobs = {}      # user_id -> {"cancel": bool, "status_msg": Message}
-awaiting_reply = {}   # user_id -> {"type": "custom_lang"/"font_upload"/"prompt_name"/"prompt_body"/"api_field", "extra": {...}}
+pending_files = {}   
+active_jobs = {}      
+awaiting_reply = {}   
 
 def default_config():
     return {
@@ -158,74 +109,62 @@ def default_config():
         "source_lang_label": "Auto Detect",
         "target_lang": "Roman Hindi",
         "target_lang_label": "Hindi (Roman)",
-        "font_name": None,           # currently selected font filename
+        "font_name": None,           
         "provider": "OpenAI-Compatible",
         "api_url": "https://api.highwayapi.ai/openai",
         "api_key": "",
-        "model_name": "gemini-3-flash-preview",
+        "model_name": "gemini-3.1-flash-lite",
         "output_format": "zip",
-        # Which processing profile to use - see CONTENT_TYPES. Controls
-        # whether long-strip tiling kicks in (manhwa), whether the image
-        # pipeline runs at all (novel = text-only, skipped), etc.
         "content_type": "manhwa",
         "content_type_label": "🍥 Manhwa (long strip)",
-        # OSB (Outside Speech Bubble) text detection - catches Manhwa-style
-        # narration/SFX/dialogue placed outside drawn bubble shapes. Defaults
-        # ON since most scraped Manhwa needs it; requires the HF_TOKEN env
-        # var / --osb setup described in the MangaTranslator README to
-        # actually download the AnimeText_yolo model on first use.
-        "osb_enabled": True,
-        # Appearance settings — all default to None, which means "let the
-        # MangaTranslator engine use its own built-in default", i.e. the
-        # original behaviour before this menu existed. Nothing is forced onto
-        # the engine unless the user explicitly picks a value here.
-        # NOTE: confirmed against the actual MangaTranslator main.py --help
-        # output. The engine has no --font-bold and no top-to-bottom-fill
-        # flag — those don't exist, so they aren't offered here. What DOES
-        # exist and is offered instead:
-        "min_font_size": None,      # int px, engine default 8   (--min-font-size)
-        "max_font_size": None,      # int px, engine default 16  (--max-font-size)
-        "auto_vertical_text": None, # True/False/None, stacks short text vertically in tall bubbles (--auto-vertical-text)
-        "line_spacing_mult": None,  # float, engine default 1.0  (--line-spacing-mult)
-        "subpixel_rendering": None, # True/False/None, engine default True (--no-subpixel-rendering flips it off)
-        "font_hinting": None,       # "none"/"slight"/"normal"/"full"/None, engine default "none" (--font-hinting)
-        "use_ligatures": None,      # True/False/None, engine default False (--use-ligatures turns it on)
-        "hyphenate_before_scaling": None,  # True/False/None, engine default True (--no-hyphenate-before-scaling flips it off)
-        "hyphen_penalty": None,     # float 100-2000, engine default 1000.0 (--hyphen-penalty)
-        "hyphenation_min_word_length": None,  # int 4-10, engine default 8 (--hyphenation-min-word-length)
-        "badness_exponent": None,   # float 2-4, engine default 3.0 (--badness-exponent)
-        "padding_pixels": None,     # float 2-12, engine default 5.0 (--padding-pixels)
-        "supersampling_factor": None,  # int 1-4, engine default 4 (--supersampling-factor)
-        "detach_trailing_punctuation": None,  # True/False/None, engine default True (--no-detach-trailing-punctuation flips it off)
+        
+        # Prompts
         "system_prompt_name": DEFAULT_SYSTEM_PROMPT_NAME,
         "system_prompt_text": DEFAULT_SYSTEM_PROMPT_TEXT,
         "user_prompt_name": DEFAULT_USER_PROMPT_NAME,
         "user_prompt_text": DEFAULT_USER_PROMPT_TEXT,
-        # ---- Manhwa Tiling Settings ----
-        # All None = use the module-level MANHWA_TILE_* defaults (unchanged
-        # behaviour). Set per-user via the "Tiling Settings" menu, which
-        # only appears when Content Type is Manhwa. These control whether/how
-        # a tall stitched strip gets sliced into detector-sized windows
-        # before translation, and how aggressively seams get checked
-        # afterwards for duplicated text. See tile_tall_pages().
-        "tile_enabled": None,           # True/False/None(=on, matches old always-on behaviour)
-        "tile_height": None,            # int px, default MANHWA_TILE_HEIGHT (1600)
-        "tile_search_radius": None,     # int px, default MANHWA_TILE_OVERLAP (700)
-        "tile_trigger_height": None,    # int px, default MANHWA_TILE_TRIGGER_HEIGHT (2200)
-        "tile_flat_threshold": None,    # float, default MANHWA_SAFE_CUT_FLAT_THRESHOLD (3.5)
-        "tile_seam_band_px": None,      # int px, default SEAM_CHECK_BAND_PX (40)
-        "tile_seam_diff_threshold": None,  # float, default SEAM_DUPLICATE_DIFF_THRESHOLD (6.0)
-        # ---- Detection Settings (YOLO/OCR) ----
-        # All None/default = engine's own built-in default, exactly as
-        # before this menu existed. See --help for main.py (MangaTranslator
-        # engine CLI) for authoritative ranges/choices.
-        "confidence": None,              # float 0.0-1.0, engine default 0.6 (bubble detection)
-        "conjoined_confidence": None,    # float 0.0-1.0, engine default 0.35
-        "panel_confidence": None,        # float 0.0-1.0, engine default 0.25
-        "seg_model": None,               # "sam3"/"sam2"/"yolo", engine default "yolo"
-        "conjoined_detection": None,     # True/False/None, engine default True (--no-conjoined-detection flips off)
-        "bubble_detector_model": None,   # "yolo_1"/"yolo_2", engine default "yolo_1"
-        "ocr_method": None,              # "LLM"/"manga-ocr"/"paddleocr-vl", engine default "LLM"
+
+        # Tiling Settings
+        "tile_enabled": None, "tile_height": None, "tile_search_radius": None, 
+        "tile_trigger_height": None, "tile_flat_threshold": None, "tile_seam_band_px": None, 
+        "tile_seam_diff_threshold": None,
+
+        # UI Modifiable Flags (Appearance, Detect)
+        "min_font_size": None, "max_font_size": None, "auto_vertical_text": None,
+        "line_spacing_mult": None, "subpixel_rendering": None, "font_hinting": None,
+        "use_ligatures": None, "hyphenate_before_scaling": None, "hyphen_penalty": None,
+        "hyphenation_min_word_length": None, "badness_exponent": None, "padding_pixels": None,
+        "supersampling_factor": None, "detach_trailing_punctuation": None,
+        "confidence": None, "conjoined_confidence": None, "panel_confidence": None,
+        "seg_model": None, "conjoined_detection": None, "bubble_detector_model": None,
+        "ocr_method": None, "osb_enabled": True,
+
+        # ALL OTHER main.py flags mapped for JSON Import/Export
+        "temperature": None, "top_p": None, "top_k": None, "max_tokens": None,
+        "translation_mode": None, "reasoning_effort": None, "effort": None, 
+        "verbosity": None, "reading_direction": None, "enable_web_search": None,
+        "enable_code_execution": None, "use_custom_sampling": None, "media_resolution": None,
+        "media_resolution_bubbles": None, "media_resolution_context": None, "image_detail": None,
+        "send_full_page_context": None, "parallel_requests": None, "batch_parallel_within_pages": None,
+        "batch_previous_context_images": None, "batch_previous_context_texts": None,
+        "use_otsu_threshold": None, "thresholding_value": None, "roi_shrink_px": None, 
+        "inpaint_colored_bubbles": None, "whiteout_conjoined_bubbles": None,
+        "upscale_method": None, "image_upscale_mode": None, "image_upscale_factor": None,
+        "auto_scale": None, "jpeg_quality": None, "png_compression": None,
+        "bubble_min_side_pixels": None, "context_image_max_side_pixels": None,
+        "verbose": None, "cpu": None, "cleaning_only": None, "upscaling_only": None, "test_mode": None,
+        "osb_inpainting_method": None, "osb_flux_backend": None,
+        "osb_flux_low_vram": None, "osb_flux_sdcpp_cache_mode": None, "osb_flux_sdcpp_diffusion_quant": None,
+        "osb_flux_sdcpp_text_encoder_quant": None, "osb_flux_upscale_small_crops": None,
+        "osb_flux_group_regions": None, "osb_flux_steps": None, "osb_flux_luminance_correction": None,
+        "osb_flux_residual_threshold": None, "osb_seed": None, "osb_max_font_size": None,
+        "osb_min_font_size": None, "osb_use_ligatures": None, "osb_outline_width": None,
+        "osb_line_spacing": None, "osb_use_subpixel": None, "osb_font_hinting": None,
+        "osb_bbox_expansion": None, "osb_render_expansion_narrow": None, "osb_render_expansion_tiny": None,
+        "osb_render_expansion_aspect_threshold": None, "osb_render_expansion_area_threshold": None,
+        "osb_text_box_proximity_ratio": None, "osb_confidence": None, "osb_filter_page_numbers": None,
+        "osb_page_filter_margin": None, "osb_page_filter_min_area": None, "osb_min_area_ignore_ratio": None,
+        "osb_min_side_pixels": None
     }
 
 def get_user_config(user_id):
@@ -234,9 +173,6 @@ def get_user_config(user_id):
         user_settings[uid] = default_config()
         _save_all_settings(user_settings)
     else:
-        # Backfill any new config keys added in later versions (e.g. osb_enabled)
-        # for users whose settings were saved before that key existed, so we
-        # never hit a KeyError on an old config.
         defaults = default_config()
         cfg = user_settings[uid]
         missing = {k: v for k, v in defaults.items() if k not in cfg}
@@ -251,16 +187,13 @@ async def save_user_config(user_id):
 
 # ================= Prompt Library Helpers =================
 def _prompt_lib_file(kind):
-    # kind: "system" or "user"
     return PROMPTS_DIR / f"{kind}_prompts.json"
 
 def load_prompt_library(kind):
     f = _prompt_lib_file(kind)
     if f.exists():
-        try:
-            return json.loads(f.read_text())
-        except Exception:
-            pass
+        try: return json.loads(f.read_text())
+        except Exception: pass
     default_name = DEFAULT_SYSTEM_PROMPT_NAME if kind == "system" else DEFAULT_USER_PROMPT_NAME
     default_text = DEFAULT_SYSTEM_PROMPT_TEXT if kind == "system" else DEFAULT_USER_PROMPT_TEXT
     lib = {default_name: default_text}
@@ -296,41 +229,26 @@ def delete_font(name):
         return True
     return False
 
-# ================= Git Persistence (GitHub Actions runner) =================
 def git_commit_data(message):
-    """Commit bot_data/ changes so fonts & prompts persist across ephemeral runner jobs."""
     try:
-        subprocess.run(["git", "add", str(DATA_DIR)], cwd=str(BASE_DIR), check=False,
-                        capture_output=True)
-        result = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=str(BASE_DIR),
-                                 capture_output=True)
-        if result.returncode == 0:
-            return  # nothing changed
-        subprocess.run(["git", "-c", "user.email=bot@yomisubs.local",
-                         "-c", "user.name=YomiSubsBot",
-                         "commit", "-m", message], cwd=str(BASE_DIR), check=False,
-                        capture_output=True)
+        subprocess.run(["git", "add", str(DATA_DIR)], cwd=str(BASE_DIR), check=False, capture_output=True)
+        result = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=str(BASE_DIR), capture_output=True)
+        if result.returncode == 0: return
+        subprocess.run(["git", "-c", "user.email=bot@yomisubs.local", "-c", "user.name=YomiSubsBot", "commit", "-m", message], cwd=str(BASE_DIR), check=False, capture_output=True)
         subprocess.run(["git", "push"], cwd=str(BASE_DIR), check=False, capture_output=True)
     except Exception as e:
         print(f"⚠️ Git persistence skipped: {e}")
 
-
-# ================= Limits =================
-PROMPT_NAME_MAX_LEN = 32  # only limit that exists anywhere in this bot
+PROMPT_NAME_MAX_LEN = 32  
 
 # ================= Safe Telegram UI Helpers =================
-# Prevents "stuck button" bug: Telegram keeps a button's loading spinner active
-# until callback_query.answer() is called, and if edit_text() throws (e.g.
-# "message is not modified" or a network hiccup) the handler used to crash
-# before ever answering the query, leaving the old menu frozen on screen.
 async def safe_edit(message, text, reply_markup=None):
     try:
         await message.edit_text(text, reply_markup=reply_markup)
     except Exception as e:
         err = str(e).lower()
         if "not modified" in err:
-            return  # content identical, nothing to do
-        # Any other failure: try to at least refresh the markup, else swallow
+            return  
         try:
             await message.edit_text(text + " ", reply_markup=reply_markup)
         except Exception as e2:
@@ -338,10 +256,8 @@ async def safe_edit(message, text, reply_markup=None):
 
 async def safe_answer(query, text=None, show_alert=False):
     try:
-        if text:
-            await query.answer(text, show_alert=show_alert)
-        else:
-            await query.answer()
+        if text: await query.answer(text, show_alert=show_alert)
+        else: await query.answer()
     except Exception as e:
         print(f"⚠️ safe_answer failed: {e}")
 
@@ -362,19 +278,22 @@ def kb_main_menu(cfg=None):
         [InlineKeyboardButton("🔡 Font Track", callback_data="menu_font")],
         [InlineKeyboardButton("🎨 Appearance", callback_data="menu_appearance")],
     ]
-    # Detection settings (YOLO/OCR) only apply to image-based pipelines -
-    # Novel content type skips detection/rendering entirely.
     if cfg is not None and cfg.get("content_type") != "novel":
         rows.append([InlineKeyboardButton("🎯 Detection Settings", callback_data="menu_detection")])
-    # Tiling Settings only makes sense for Manhwa (long-strip) content, since
-    # that's the only content type that ever tiles tall pages.
     if cfg is not None and cfg.get("content_type") == "manhwa":
         rows.append([InlineKeyboardButton("✂️ Tiling Settings", callback_data="menu_tiling")])
+    rows += [
+        [InlineKeyboardButton("🧠 Generation Settings", callback_data="xf_group_generation")],
+        [InlineKeyboardButton("🧹 Cleaning & Upscaling", callback_data="xf_group_cleaning")],
+        [InlineKeyboardButton("⚙️ Batch & Performance", callback_data="xf_group_batch")],
+    ]
+    if cfg is not None and cfg.get("osb_enabled", True):
+        rows.append([InlineKeyboardButton("🫧 OSB Tuning", callback_data="xf_group_osb")])
     rows += [
         [InlineKeyboardButton("⚙️ Provider & API", callback_data="menu_api")],
         [InlineKeyboardButton("📝 Prompt Library", callback_data="menu_prompt")],
         [InlineKeyboardButton("📦 Output Format", callback_data="menu_output")],
-        [InlineKeyboardButton("💾 Backup (Import/Export)", callback_data="menu_backup")],
+        [InlineKeyboardButton("💾 Backup (Import/Export JSON)", callback_data="menu_backup")],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -463,7 +382,6 @@ def kb_appear_layout_menu(cfg):
     badness = _appear_val_label(cfg, "badness_exponent", "3.0")
     hyphen_pen = _appear_val_label(cfg, "hyphen_penalty", "1000.0")
     hyphen_len = _appear_val_label(cfg, "hyphenation_min_word_length", "8")
-
     subpx = cfg.get("subpixel_rendering")
     subpx_label = "Original/Default (On)" if subpx is None else ("✅ On" if subpx else "❌ Off")
     hyph_scale = cfg.get("hyphenate_before_scaling")
@@ -484,7 +402,6 @@ def kb_appear_layout_menu(cfg):
     ]
     return InlineKeyboardMarkup(rows)
 
-# Generic On/Off/Default selector for any boolean appearance field.
 APPEAR_BOOL_LABELS = {
     "use_ligatures": ("Ligatures", "menu_appear_font"),
     "auto_vertical_text": ("Auto-Vertical Text", "menu_appear_font"),
@@ -495,8 +412,7 @@ APPEAR_BOOL_LABELS = {
 
 def kb_appear_bool_select(cfg, field):
     val = cfg.get(field)
-    def mark(v):
-        return "✅ " if val == v else ""
+    def mark(v): return "✅ " if val == v else ""
     _, back_target = APPEAR_BOOL_LABELS.get(field, ("Setting", "menu_appearance"))
     rows = [
         [InlineKeyboardButton(f"{mark(True)}On", callback_data=f"appearboolset_{field}_on")],
@@ -522,6 +438,199 @@ def kb_font_hinting_select(cfg):
 SEG_MODEL_OPTIONS = ["yolo", "sam2", "sam3"]
 BUBBLE_DETECTOR_OPTIONS = ["yolo_1", "yolo_2"]
 OCR_METHOD_OPTIONS = ["LLM", "manga-ocr", "paddleocr-vl"]
+TRANSLATION_MODE_OPTIONS = ["one-step", "two-step"]
+
+# ================= Value Validation (prevents invalid CLI args reaching main.py) =================
+# Mirrors the argparse `choices=[...]` in MangaTranslator/main.py. Any cfg value that
+# isn't in these sets (e.g. from a hand-edited or stale imported JSON file) gets
+# reset to None (= engine default) instead of being passed to the CLI and crashing
+# the whole job with "invalid choice: '...'".
+VALID_CHOICES = {
+    "translation_mode": set(TRANSLATION_MODE_OPTIONS),
+    "seg_model": set(SEG_MODEL_OPTIONS),
+    "bubble_detector_model": set(BUBBLE_DETECTOR_OPTIONS),
+    "ocr_method": set(OCR_METHOD_OPTIONS),
+    "reading_direction": {"rtl", "ltr"},
+    "reasoning_effort": {"xhigh", "high", "medium", "low", "minimal", "none"},
+    "effort": {"high", "medium", "low"},
+    "verbosity": {"high", "medium", "low"},
+    "media_resolution": {"auto", "high", "medium", "low"},
+    "media_resolution_bubbles": {"auto", "high", "medium", "low"},
+    "media_resolution_context": {"auto", "high", "medium", "low"},
+    "image_detail": {"auto", "original", "high", "low"},
+    "upscale_method": {"model", "model_lite", "lanczos", "none"},
+    "image_upscale_mode": {"off", "initial", "final"},
+    "osb_inpainting_method": {"flux_klein_9b", "flux_klein_4b", "flux_kontext", "opencv", "none"},
+    "osb_flux_backend": {"sdcpp", "sdnq", "nunchaku"},
+    "osb_flux_sdcpp_cache_mode": {"spectrum", "cache-dit", "taylorseer", "dbcache", "none"},
+    "osb_font_hinting": {"none", "slight", "normal", "full"},
+}
+
+def sanitize_cfg_values(cfg):
+    """Reset any cfg field to None (engine default) if it holds a value that isn't
+    a legal choice for that field's CLI flag. Returns [(field, bad_value), ...] that
+    were cleared, so the caller can tell the user exactly what was wrong."""
+    cleared = []
+    for field, allowed in VALID_CHOICES.items():
+        val = cfg.get(field)
+        if val is not None and val not in allowed:
+            cleared.append((field, val))
+            cfg[field] = None
+    return cleared
+
+# ================= Extended Settings Registry (auto-derived from main.py argparse) =================
+# Every field here mirrors an actual --flag in MangaTranslator/main.py exactly (type, default,
+# choices), so values entered through these menus can never desync from what the engine accepts.
+FIELD_REGISTRY = {
+    'temperature': {'group': 'generation', 'label': '🌡 Temperature', 'vtype': 'val', 'argtype': 'float', 'default': 0.1, 'choices': None, 'hint': '0.0-2.0'},
+    'top_p': {'group': 'generation', 'label': '🎯 Top P', 'vtype': 'val', 'argtype': 'float', 'default': 0.95, 'choices': None, 'hint': '0.0-1.0'},
+    'top_k': {'group': 'generation', 'label': '🔢 Top K', 'vtype': 'val', 'argtype': 'int', 'default': 1, 'choices': None, 'hint': 'positive integer'},
+    'max_tokens': {'group': 'generation', 'label': '📏 Max Tokens', 'vtype': 'val', 'argtype': 'int', 'default': None, 'choices': None, 'hint': '2048-32768'},
+    'use_custom_sampling': {'group': 'generation', 'label': '🎛 Custom Sampling', 'vtype': 'bool_invert', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'reasoning_effort': {'group': 'generation', 'label': '🧠 Reasoning Effort', 'vtype': 'val', 'argtype': 'str', 'default': 'medium', 'choices': ['xhigh', 'high', 'medium', 'low', 'minimal', 'none'], 'hint': None},
+    'effort': {'group': 'generation', 'label': '⚡ Effort', 'vtype': 'val', 'argtype': 'str', 'default': 'medium', 'choices': ['high', 'medium', 'low'], 'hint': None},
+    'verbosity': {'group': 'generation', 'label': '💬 Verbosity', 'vtype': 'val', 'argtype': 'str', 'default': 'low', 'choices': ['high', 'medium', 'low'], 'hint': None},
+    'reading_direction': {'group': 'generation', 'label': '↔️ Reading Direction', 'vtype': 'val', 'argtype': 'str', 'default': 'rtl', 'choices': ['rtl', 'ltr'], 'hint': None},
+    'enable_web_search': {'group': 'generation', 'label': '🌐 Web Search', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'enable_code_execution': {'group': 'generation', 'label': '💻 Code Execution', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'media_resolution': {'group': 'generation', 'label': '🖼 Media Resolution', 'vtype': 'val', 'argtype': 'str', 'default': 'auto', 'choices': ['auto', 'high', 'medium', 'low'], 'hint': None},
+    'media_resolution_bubbles': {'group': 'generation', 'label': '🫧 Media Resolution (Bubbles)', 'vtype': 'val', 'argtype': 'str', 'default': 'auto', 'choices': ['auto', 'high', 'medium', 'low'], 'hint': None},
+    'media_resolution_context': {'group': 'generation', 'label': '📄 Media Resolution (Context)', 'vtype': 'val', 'argtype': 'str', 'default': 'auto', 'choices': ['auto', 'high', 'medium', 'low'], 'hint': None},
+    'image_detail': {'group': 'generation', 'label': '🔍 Image Detail', 'vtype': 'val', 'argtype': 'str', 'default': 'auto', 'choices': ['auto', 'original', 'high', 'low'], 'hint': None},
+    'send_full_page_context': {'group': 'generation', 'label': '📃 Send Full Page Context', 'vtype': 'bool_invert', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'inpaint_colored_bubbles': {'group': 'cleaning', 'label': '🎨 Inpaint Colored Bubbles', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'use_otsu_threshold': {'group': 'cleaning', 'label': '⬜ Use Otsu Threshold', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'thresholding_value': {'group': 'cleaning', 'label': '🎚 Thresholding Value', 'vtype': 'val', 'argtype': 'int', 'default': 200, 'choices': None, 'hint': '0-255'},
+    'roi_shrink_px': {'group': 'cleaning', 'label': '📐 ROI Shrink (px)', 'vtype': 'val', 'argtype': 'int', 'default': 5, 'choices': None, 'hint': '0-10'},
+    'whiteout_conjoined_bubbles': {'group': 'cleaning', 'label': '⬜ Whiteout Conjoined Bubbles', 'vtype': 'bool_invert', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'upscale_method': {'group': 'cleaning', 'label': '⬆️ Upscale Method', 'vtype': 'val', 'argtype': 'str', 'default': 'model_lite', 'choices': ['model', 'model_lite', 'lanczos', 'none'], 'hint': None},
+    'image_upscale_mode': {'group': 'cleaning', 'label': '⬆️ Image Upscale Mode', 'vtype': 'val', 'argtype': None, 'default': 'off', 'choices': ['off', 'initial', 'final'], 'hint': None},
+    'image_upscale_factor': {'group': 'cleaning', 'label': '✖️ Image Upscale Factor', 'vtype': 'val', 'argtype': 'float', 'default': 2.0, 'choices': None, 'hint': '1.0-8.0'},
+    'jpeg_quality': {'group': 'cleaning', 'label': '🖼 JPEG Quality', 'vtype': 'val', 'argtype': 'int', 'default': 95, 'choices': None, 'hint': '1-100'},
+    'png_compression': {'group': 'cleaning', 'label': '🗜 PNG Compression', 'vtype': 'val', 'argtype': 'int', 'default': 2, 'choices': None, 'hint': '0-6'},
+    'auto_scale': {'group': 'cleaning', 'label': '📏 Auto Scale', 'vtype': 'bool_invert', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'bubble_min_side_pixels': {'group': 'cleaning', 'label': '🫧 Bubble Min Side (px)', 'vtype': 'val', 'argtype': 'int', 'default': 128, 'choices': None, 'hint': 'positive integer'},
+    'context_image_max_side_pixels': {'group': 'cleaning', 'label': '📄 Context Image Max Side (px)', 'vtype': 'val', 'argtype': 'int', 'default': 1024, 'choices': None, 'hint': 'positive integer'},
+    'parallel_requests': {'group': 'batch', 'label': '⚙️ Parallel Requests', 'vtype': 'val', 'argtype': 'int', 'default': 1, 'choices': None, 'hint': '1-20'},
+    'batch_parallel_within_pages': {'group': 'batch', 'label': '⚙️ Parallel Within Pages', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'batch_previous_context_images': {'group': 'batch', 'label': '🖼 Previous Context Images', 'vtype': 'val', 'argtype': 'int', 'default': 0, 'choices': None, 'hint': '0-10'},
+    'batch_previous_context_texts': {'group': 'batch', 'label': '📝 Previous Context Texts', 'vtype': 'val', 'argtype': 'int', 'default': 3, 'choices': None, 'hint': '0-50'},
+    'verbose': {'group': 'batch', 'label': '🔊 Verbose Logging', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'cpu': {'group': 'batch', 'label': '🖥 Force CPU', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'cleaning_only': {'group': 'batch', 'label': '🧹 Cleaning Only', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'upscaling_only': {'group': 'batch', 'label': '⬆️ Upscaling Only', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'test_mode': {'group': 'batch', 'label': '🧪 Test Mode', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'osb_inpainting_method': {'group': 'osb', 'label': '🎨 OSB Inpainting Method', 'vtype': 'val', 'argtype': 'str', 'default': 'flux_klein_4b', 'choices': ['flux_klein_9b', 'flux_klein_4b', 'flux_kontext', 'opencv', 'none'], 'hint': None},
+    'osb_flux_backend': {'group': 'osb', 'label': '⚙️ OSB Flux Backend', 'vtype': 'val', 'argtype': 'str', 'default': 'sdnq', 'choices': ['sdcpp', 'sdnq', 'nunchaku'], 'hint': None},
+    'osb_flux_low_vram': {'group': 'osb', 'label': '💾 OSB Flux Low VRAM', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'osb_flux_sdcpp_cache_mode': {'group': 'osb', 'label': '💾 OSB Flux SDCPP Cache Mode', 'vtype': 'val', 'argtype': 'str', 'default': 'none', 'choices': ['spectrum', 'cache-dit', 'taylorseer', 'dbcache', 'none'], 'hint': None},
+    'osb_flux_sdcpp_diffusion_quant': {'group': 'osb', 'label': '🔢 OSB Flux SDCPP Diffusion Quant', 'vtype': 'val', 'argtype': 'str', 'default': 'Q4_K_M', 'choices': None, 'hint': 'text, e.g. Q4_K_M'},
+    'osb_flux_sdcpp_text_encoder_quant': {'group': 'osb', 'label': '🔢 OSB Flux SDCPP Text Encoder Quant', 'vtype': 'val', 'argtype': 'str', 'default': None, 'choices': None, 'hint': 'text'},
+    'osb_flux_upscale_small_crops': {'group': 'osb', 'label': '⬆️ OSB Flux Upscale Small Crops', 'vtype': 'bool_invert', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'osb_flux_group_regions': {'group': 'osb', 'label': '🧩 OSB Flux Group Regions', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'osb_flux_steps': {'group': 'osb', 'label': '🔁 OSB Flux Steps', 'vtype': 'val', 'argtype': 'int', 'default': 4, 'choices': None, 'hint': 'positive integer'},
+    'osb_flux_luminance_correction': {'group': 'osb', 'label': '💡 OSB Flux Luminance Correction', 'vtype': 'bool_invert', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'osb_flux_residual_threshold': {'group': 'osb', 'label': '🎚 OSB Flux Residual Threshold', 'vtype': 'val', 'argtype': 'float', 'default': 0.15, 'choices': None, 'hint': 'decimal'},
+    'osb_seed': {'group': 'osb', 'label': '🌱 OSB Seed', 'vtype': 'val', 'argtype': 'int', 'default': 1, 'choices': None, 'hint': 'integer'},
+    'osb_max_font_size': {'group': 'osb', 'label': '🔠 OSB Max Font Size (px)', 'vtype': 'val', 'argtype': 'int', 'default': 64, 'choices': None, 'hint': 'positive integer'},
+    'osb_min_font_size': {'group': 'osb', 'label': '🔡 OSB Min Font Size (px)', 'vtype': 'val', 'argtype': 'int', 'default': 10, 'choices': None, 'hint': 'positive integer'},
+    'osb_use_ligatures': {'group': 'osb', 'label': '🔗 OSB Ligatures', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'osb_outline_width': {'group': 'osb', 'label': '⭕ OSB Outline Width', 'vtype': 'val', 'argtype': 'float', 'default': 3.0, 'choices': None, 'hint': 'decimal'},
+    'osb_line_spacing': {'group': 'osb', 'label': '📏 OSB Line Spacing', 'vtype': 'val', 'argtype': 'float', 'default': 1.0, 'choices': None, 'hint': 'decimal'},
+    'osb_use_subpixel': {'group': 'osb', 'label': '🖥 OSB Subpixel Rendering', 'vtype': 'bool_true', 'argtype': None, 'default': True, 'choices': None, 'hint': None},
+    'osb_font_hinting': {'group': 'osb', 'label': '🔎 OSB Font Hinting', 'vtype': 'val', 'argtype': 'str', 'default': 'none', 'choices': ['none', 'slight', 'normal', 'full'], 'hint': None},
+    'osb_bbox_expansion': {'group': 'osb', 'label': '📦 OSB Bbox Expansion', 'vtype': 'val', 'argtype': 'float', 'default': 0.1, 'choices': None, 'hint': 'decimal'},
+    'osb_render_expansion_narrow': {'group': 'osb', 'label': '↔️ OSB Render Expansion (Narrow)', 'vtype': 'val', 'argtype': 'float', 'default': 1.0, 'choices': None, 'hint': 'decimal'},
+    'osb_render_expansion_tiny': {'group': 'osb', 'label': '🔬 OSB Render Expansion (Tiny)', 'vtype': 'val', 'argtype': 'float', 'default': 1.0, 'choices': None, 'hint': 'decimal'},
+    'osb_render_expansion_aspect_threshold': {'group': 'osb', 'label': '📐 OSB Aspect Threshold', 'vtype': 'val', 'argtype': 'float', 'default': 0.4, 'choices': None, 'hint': 'decimal'},
+    'osb_render_expansion_area_threshold': {'group': 'osb', 'label': '📐 OSB Area Threshold', 'vtype': 'val', 'argtype': 'float', 'default': 0.005, 'choices': None, 'hint': 'decimal'},
+    'osb_text_box_proximity_ratio': {'group': 'osb', 'label': '📏 OSB Text Box Proximity Ratio', 'vtype': 'val', 'argtype': 'float', 'default': 0.02, 'choices': None, 'hint': 'decimal'},
+    'osb_confidence': {'group': 'osb', 'label': '🎯 OSB Confidence', 'vtype': 'val', 'argtype': 'float', 'default': 0.6, 'choices': None, 'hint': '0.0-1.0'},
+    'osb_filter_page_numbers': {'group': 'osb', 'label': '🔢 OSB Filter Page Numbers', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'osb_page_filter_margin': {'group': 'osb', 'label': '📐 OSB Page Filter Margin', 'vtype': 'val', 'argtype': 'float', 'default': 0.1, 'choices': None, 'hint': 'decimal'},
+    'osb_page_filter_min_area': {'group': 'osb', 'label': '📐 OSB Page Filter Min Area', 'vtype': 'val', 'argtype': 'float', 'default': 0.05, 'choices': None, 'hint': 'decimal'},
+    'osb_min_area_ignore_ratio': {'group': 'osb', 'label': '📐 OSB Min Area Ignore Ratio', 'vtype': 'val', 'argtype': 'float', 'default': 0.0, 'choices': None, 'hint': 'decimal'},
+    'osb_min_side_pixels': {'group': 'osb', 'label': '🫧 OSB Min Side (px)', 'vtype': 'val', 'argtype': 'int', 'default': 128, 'choices': None, 'hint': 'positive integer'},
+}
+
+FIELD_GROUPS = {
+    'generation': ['temperature', 'top_p', 'top_k', 'max_tokens', 'use_custom_sampling', 'reasoning_effort', 'effort', 'verbosity', 'reading_direction', 'enable_web_search', 'enable_code_execution', 'media_resolution', 'media_resolution_bubbles', 'media_resolution_context', 'image_detail', 'send_full_page_context'],
+    'cleaning': ['inpaint_colored_bubbles', 'use_otsu_threshold', 'thresholding_value', 'roi_shrink_px', 'whiteout_conjoined_bubbles', 'upscale_method', 'image_upscale_mode', 'image_upscale_factor', 'jpeg_quality', 'png_compression', 'auto_scale', 'bubble_min_side_pixels', 'context_image_max_side_pixels'],
+    'batch': ['parallel_requests', 'batch_parallel_within_pages', 'batch_previous_context_images', 'batch_previous_context_texts', 'verbose', 'cpu', 'cleaning_only', 'upscaling_only', 'test_mode'],
+    'osb': ['osb_inpainting_method', 'osb_flux_backend', 'osb_flux_low_vram', 'osb_flux_sdcpp_cache_mode', 'osb_flux_sdcpp_diffusion_quant', 'osb_flux_sdcpp_text_encoder_quant', 'osb_flux_upscale_small_crops', 'osb_flux_group_regions', 'osb_flux_steps', 'osb_flux_luminance_correction', 'osb_flux_residual_threshold', 'osb_seed', 'osb_max_font_size', 'osb_min_font_size', 'osb_use_ligatures', 'osb_outline_width', 'osb_line_spacing', 'osb_use_subpixel', 'osb_font_hinting', 'osb_bbox_expansion', 'osb_render_expansion_narrow', 'osb_render_expansion_tiny', 'osb_render_expansion_aspect_threshold', 'osb_render_expansion_area_threshold', 'osb_text_box_proximity_ratio', 'osb_confidence', 'osb_filter_page_numbers', 'osb_page_filter_margin', 'osb_page_filter_min_area', 'osb_min_area_ignore_ratio', 'osb_min_side_pixels'],
+}
+
+FIELD_GROUP_TITLES = {
+    "generation": "🧠 Generation Settings",
+    "cleaning": "🧹 Cleaning & Upscaling",
+    "batch": "⚙️ Batch & Performance",
+    "osb": "🫧 OSB (Outside-Bubble Text) Tuning",
+}
+
+# ================= Generic Extended-Settings UI (data-driven from FIELD_REGISTRY) =================
+def _fmt_field_value(key):
+    meta = FIELD_REGISTRY[key]
+    def _get(cfg):
+        v = cfg.get(key)
+        if v is None:
+            d = meta["default"]
+            return f"Original/Default ({d})" if d is not None else "Original/Default"
+        return str(v)
+    return _get
+
+def kb_field_group_menu(cfg, group):
+    keys = FIELD_GROUPS[group]
+    rows = []
+    for key in keys:
+        meta = FIELD_REGISTRY[key]
+        val = cfg.get(key)
+        if meta["vtype"] in ("bool_true", "bool_invert"):
+            if val is None:
+                shown = "Original/Default"
+            else:
+                shown = "✅ On" if val else "❌ Off"
+        elif meta["choices"]:
+            shown = val if val is not None else f"Original/Default ({meta['default']})"
+        else:
+            shown = val if val is not None else f"Original/Default ({meta['default']})" if meta["default"] is not None else "Original/Default"
+        rows.append([InlineKeyboardButton(f"{meta['label']}: {shown}", callback_data=f"xf_open_{group}_{key}")])
+    rows.append([InlineKeyboardButton("♻️ Reset Group to Original/Default", callback_data=f"xf_reset_{group}")])
+    rows.append([InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")])
+    return InlineKeyboardMarkup(rows)
+
+def kb_field_bool_select(cfg, key):
+    meta = FIELD_REGISTRY[key]
+    val = cfg.get(key)
+    def mark(v): return "✅ " if val == v else ""
+    rows = [
+        [InlineKeyboardButton(f"{mark(True)}On", callback_data=f"xfboolset_{key}_on")],
+        [InlineKeyboardButton(f"{mark(False)}Off", callback_data=f"xfboolset_{key}_off")],
+        [InlineKeyboardButton(f"{'✅ ' if val is None else ''}Original/Default", callback_data=f"xfboolset_{key}_default")],
+        [InlineKeyboardButton("🔙 Back", callback_data=f"xf_group_{meta['group']}")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+def kb_field_choice_select(cfg, key):
+    meta = FIELD_REGISTRY[key]
+    current = cfg.get(key)
+    rows = []
+    for opt in meta["choices"]:
+        mark = "✅ " if current == opt else ""
+        rows.append([InlineKeyboardButton(f"{mark}{opt}", callback_data=f"xfchoiceset_{key}::{opt}")])
+    default_disp = meta["default"] if meta["default"] is not None else "engine default"
+    rows.append([InlineKeyboardButton(f"{'✅ ' if current is None else ''}Original/Default ({default_disp})", callback_data=f"xfchoiceset_{key}::__default__")])
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data=f"xf_group_{meta['group']}")])
+    return InlineKeyboardMarkup(rows)
+
+async def open_field_editor(query, cfg, group, key):
+    meta = FIELD_REGISTRY[key]
+    if meta["vtype"] in ("bool_true", "bool_invert"):
+        await safe_edit(query.message, f"{meta['label']}:", reply_markup=kb_field_bool_select(cfg, key))
+        return True
+    if meta["choices"]:
+        await safe_edit(query.message, f"{meta['label']}:", reply_markup=kb_field_choice_select(cfg, key))
+        return True
+    return False  # numeric/text field -> caller sets awaiting_reply and prompts
 
 def _detect_val_label(cfg, field, default_display):
     v = cfg.get(field)
@@ -534,9 +643,10 @@ def kb_detection_menu(cfg):
     seg = _detect_val_label(cfg, "seg_model", "yolo")
     bubble_model = _detect_val_label(cfg, "bubble_detector_model", "yolo_1")
     ocr = _detect_val_label(cfg, "ocr_method", "LLM")
-
     conj_det = cfg.get("conjoined_detection")
     conj_det_label = "Original/Default (On)" if conj_det is None else ("✅ On" if conj_det else "❌ Off")
+
+    trans_mode = _detect_val_label(cfg, "translation_mode", "one-step")
 
     rows = [
         [InlineKeyboardButton(f"🎯 Bubble Confidence: {conf}", callback_data="detect_field_confidence")],
@@ -546,15 +656,26 @@ def kb_detection_menu(cfg):
         [InlineKeyboardButton(f"🧠 Segmentation Model: {seg}", callback_data="detect_seg_open")],
         [InlineKeyboardButton(f"🫧 Bubble Detector Model: {bubble_model}", callback_data="detect_bubblemodel_open")],
         [InlineKeyboardButton(f"👁 OCR Method: {ocr}", callback_data="detect_ocr_open")],
+        [InlineKeyboardButton(f"🔀 Translation Mode: {trans_mode}", callback_data="detect_transmode_open")],
         [InlineKeyboardButton("♻️ Reset All to Original/Default", callback_data="detect_reset_all")],
         [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")],
     ]
     return InlineKeyboardMarkup(rows)
 
+def kb_translation_mode_select(cfg):
+    current = cfg.get("translation_mode")
+    rows = []
+    for opt in TRANSLATION_MODE_OPTIONS:
+        mark = "✅ " if current == opt else ""
+        label = f"{opt} (combines OCR/Translate)" if opt == "one-step" else f"{opt} (separates OCR/Translate — better for weaker LLMs)"
+        rows.append([InlineKeyboardButton(f"{mark}{label}", callback_data=f"transmodeset_{opt}")])
+    rows.append([InlineKeyboardButton(f"{'✅ ' if current is None else ''}Original/Default (one-step)", callback_data="transmodeset_default")])
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data="menu_detection")])
+    return InlineKeyboardMarkup(rows)
+
 def kb_detect_bool_select(cfg, field):
     val = cfg.get(field)
-    def mark(v):
-        return "✅ " if val == v else ""
+    def mark(v): return "✅ " if val == v else ""
     rows = [
         [InlineKeyboardButton(f"{mark(True)}On", callback_data=f"detectboolset_{field}_on")],
         [InlineKeyboardButton(f"{mark(False)}Off", callback_data=f"detectboolset_{field}_off")],
@@ -623,8 +744,7 @@ def kb_tiling_menu(cfg):
 
 def kb_tile_bool_select(cfg, field):
     val = cfg.get(field)
-    def mark(v):
-        return "✅ " if val == v else ""
+    def mark(v): return "✅ " if val == v else ""
     rows = [
         [InlineKeyboardButton(f"{mark(True)}On", callback_data=f"tileboolset_{field}_on")],
         [InlineKeyboardButton(f"{mark(False)}Off", callback_data=f"tileboolset_{field}_off")],
@@ -759,9 +879,6 @@ async def cancel_cmd(client, message: Message):
         await message.reply_text("✅ Session cleared.")
 
 # ================= Safe Background Task Runner =================
-# asyncio.create_task() silently swallows exceptions if the task's result is
-# never awaited/checked. That was the cause of jobs freezing at "Downloading
-# payload" with no error shown - any exception in the pipeline just vanished.
 def run_job(coro, status_msg, user_id):
     async def _runner():
         try:
@@ -783,18 +900,12 @@ async def handle_callbacks(client, query: CallbackQuery):
     user_id = query.from_user.id
     cfg = get_user_config(user_id)
 
-    # Answer immediately so the button never stays stuck in a loading state,
-    # even if something below raises. Branches that want a custom toast text
-    # call safe_answer(query, "...") again later, which is harmless (Telegram
-    # ignores a second answer silently on the client side after the first).
     await safe_answer(query)
 
-    # ---------- Main Menu ----------
     if data == "main_menu":
         await safe_edit(query.message, "🛠 **Settings**\nChoose a category to configure:", reply_markup=kb_main_menu(cfg))
         return
 
-    # ---------- Content Type Menu ----------
     if data == "menu_content_type":
         await safe_edit(
             query.message,
@@ -824,7 +935,6 @@ async def handle_callbacks(client, query: CallbackQuery):
         )
         return
 
-    # ---------- Language Menu ----------
     if data == "menu_lang":
         await safe_edit(query.message, 
             f"🌐 **Language Settings**\nSource: `{cfg['source_lang_label']}`\nTarget: `{cfg['target_lang_label']}`\n\nTap a field to change it:",
@@ -870,7 +980,6 @@ async def handle_callbacks(client, query: CallbackQuery):
         )
         return
 
-    # ---------- Font Menu ----------
     if data == "menu_font":
         fonts = list_fonts()
         body = "🔡 **Font Track**\n"
@@ -909,7 +1018,6 @@ async def handle_callbacks(client, query: CallbackQuery):
         await safe_edit(query.message, body, reply_markup=kb_font_menu(cfg))
         return
 
-    # ---------- Appearance Menu ----------
     if data == "menu_appearance":
         await safe_edit(
             query.message,
@@ -977,7 +1085,6 @@ async def handle_callbacks(client, query: CallbackQuery):
         return
 
     if data.startswith("appearboolset_"):
-        # format: appearboolset_<field>_<on|off|default>
         rest = data[len("appearboolset_"):]
         field, choice = rest.rsplit("_", 1)
         cfg[field] = None if choice == "default" else (choice == "on")
@@ -1004,7 +1111,6 @@ async def handle_callbacks(client, query: CallbackQuery):
         )
         return
 
-    # ---------- API / Provider Menu ----------
     if data == "menu_api":
         await safe_edit(query.message, 
             "⚙️ **Provider & API Configuration**",
@@ -1025,13 +1131,12 @@ async def handle_callbacks(client, query: CallbackQuery):
         return
 
     if data.startswith("api_field_"):
-        field = data.split("api_field_", 1)[1]  # api_url / api_key / model_name
+        field = data.split("api_field_", 1)[1] 
         pretty = {"api_url": "Base URL", "api_key": "API Key", "model_name": "Model ID"}.get(field, field)
         awaiting_reply[user_id] = {"type": "api_field", "extra": {"field": field}}
         await safe_edit(query.message, f"✍️ **Reply to this message with the new {pretty}.**")
         return
 
-    # ---------- Prompt Library Menu ----------
     if data == "menu_prompt":
         await safe_edit(query.message, "📝 **Prompt Library**\nSystem prompt = model behaviour. User prompt = your custom focus.", reply_markup=kb_prompt_root())
         return
@@ -1061,7 +1166,6 @@ async def handle_callbacks(client, query: CallbackQuery):
         _, kind, name = data.split("_", 2)
         ok = delete_prompt(kind, name)
         if ok:
-            # if deleted prompt was selected, fall back to whatever remains first
             lib = load_prompt_library(kind)
             fallback_name = next(iter(lib))
             if kind == "system" and cfg["system_prompt_name"] == name:
@@ -1085,8 +1189,6 @@ async def handle_callbacks(client, query: CallbackQuery):
         return
 
     if data.startswith("prompt_edit_"):
-        # Quick in-place edit of whichever prompt is currently selected, without
-        # having to delete it and re-add a new one under a different name.
         kind = data.split("prompt_edit_", 1)[1]
         name = cfg["system_prompt_name"] if kind == "system" else cfg["user_prompt_name"]
         current_text = cfg["system_prompt_text"] if kind == "system" else cfg["user_prompt_text"]
@@ -1101,7 +1203,6 @@ async def handle_callbacks(client, query: CallbackQuery):
         )
         return
 
-    # ---------- Output Format Menu ----------
     if data == "menu_output":
         await safe_edit(query.message, f"📦 **Output Format**\nCurrent: `{cfg['output_format']}`", reply_markup=kb_output_menu(cfg))
         return
@@ -1122,7 +1223,6 @@ async def handle_callbacks(client, query: CallbackQuery):
         await safe_edit(query.message, f"📦 **Output Format**\nCurrent: `{cfg['output_format']}`", reply_markup=kb_output_menu(cfg))
         return
 
-    # ---------- Detection Settings Menu (YOLO/OCR) ----------
     if data == "menu_detection":
         await safe_edit(
             query.message,
@@ -1207,10 +1307,22 @@ async def handle_callbacks(client, query: CallbackQuery):
         await safe_edit(query.message, "👁 **OCR Method:**", reply_markup=kb_ocr_method_select(cfg))
         return
 
+    if data == "detect_transmode_open":
+        await safe_edit(query.message, "🔀 **Translation Mode:**", reply_markup=kb_translation_mode_select(cfg))
+        return
+
+    if data.startswith("transmodeset_"):
+        choice = data.split("_", 1)[1]
+        cfg["translation_mode"] = None if choice == "default" else choice
+        await save_user_config(user_id)
+        await safe_answer(query, "Translation mode updated")
+        await safe_edit(query.message, "🔀 **Translation Mode:**", reply_markup=kb_translation_mode_select(cfg))
+        return
+
     if data == "detect_reset_all":
         for field in (
             "confidence", "conjoined_confidence", "panel_confidence", "seg_model",
-            "conjoined_detection", "bubble_detector_model", "ocr_method",
+            "conjoined_detection", "bubble_detector_model", "ocr_method", "translation_mode",
         ):
             cfg[field] = None
         await save_user_config(user_id)
@@ -1221,8 +1333,61 @@ async def handle_callbacks(client, query: CallbackQuery):
             reply_markup=kb_detection_menu(cfg)
         )
         return
+    # ---- Extended settings: group menu open ----
+    if data.startswith("xf_group_"):
+        group = data[len("xf_group_"):]
+        title = FIELD_GROUP_TITLES.get(group, group)
+        await safe_edit(query.message, f"{title}\nTap a setting to change it.", reply_markup=kb_field_group_menu(cfg, group))
+        return
 
-    # ---------- Tiling Settings Menu (Manhwa only) ----------
+    # ---- Extended settings: open a specific field editor ----
+    if data.startswith("xf_open_"):
+        rest = data[len("xf_open_"):]
+        group, key = rest.split("_", 1)
+        handled = await open_field_editor(query, cfg, group, key)
+        if not handled:
+            meta = FIELD_REGISTRY[key]
+            awaiting_reply[user_id] = {"type": "xf_field", "extra": {"key": key}}
+            hint = meta["hint"] or ("a whole number" if meta["argtype"] == "int" else "a decimal number" if meta["argtype"] == "float" else "text")
+            await safe_edit(
+                query.message,
+                f"✍️ **Reply to this message with the new {meta['label']}** ({hint}).\n"
+                f"Reply with `default` to reset to Original/Default."
+            )
+        return
+
+    # ---- Extended settings: bool set ----
+    if data.startswith("xfboolset_"):
+        rest = data[len("xfboolset_"):]
+        key, choice = rest.rsplit("_", 1)
+        cfg[key] = None if choice == "default" else (choice == "on")
+        await save_user_config(user_id)
+        await safe_answer(query, "Updated")
+        await safe_edit(query.message, f"{FIELD_REGISTRY[key]['label']}:", reply_markup=kb_field_bool_select(cfg, key))
+        return
+
+    # ---- Extended settings: choice set ----
+    if data.startswith("xfchoiceset_"):
+        rest = data[len("xfchoiceset_"):]
+        key, choice = rest.split("::", 1)
+        cfg[key] = None if choice == "__default__" else choice
+        await save_user_config(user_id)
+        await safe_answer(query, "Updated")
+        await safe_edit(query.message, f"{FIELD_REGISTRY[key]['label']}:", reply_markup=kb_field_choice_select(cfg, key))
+        return
+
+    # ---- Extended settings: reset whole group ----
+    if data.startswith("xf_reset_"):
+        group = data[len("xf_reset_"):]
+        for key in FIELD_GROUPS[group]:
+            cfg[key] = None
+        await save_user_config(user_id)
+        await safe_answer(query, "Group reset to Original/Default")
+        title = FIELD_GROUP_TITLES.get(group, group)
+        await safe_edit(query.message, f"{title}\nAll settings in this group reset to Original/Default.", reply_markup=kb_field_group_menu(cfg, group))
+        return
+
+
     if data == "menu_tiling":
         await safe_edit(
             query.message,
@@ -1291,14 +1456,14 @@ async def handle_callbacks(client, query: CallbackQuery):
         )
         return
 
-    # ---------- Backup / Import-Export Menu ----------
     if data == "menu_backup":
         await safe_edit(
             query.message,
             "💾 **Backup Settings**\n"
             "Export your full settings (language, font, appearance, tiling, "
             "API, prompts, output format) as a JSON file you can save, or "
-            "import a previously exported JSON file to restore/copy a config.",
+            "import a previously exported JSON file to restore/copy a config.\n\n"
+            "**Note:** By exporting this JSON, you can also manually edit all 70+ hidden parameters from `main.py`!",
             reply_markup=kb_backup_menu()
         )
         return
@@ -1311,7 +1476,7 @@ async def handle_callbacks(client, query: CallbackQuery):
         await client.send_document(
             query.message.chat.id,
             document=str(export_path),
-            caption="📤 Your exported settings. Use **Import Settings** to restore this later."
+            caption="📤 Your exported settings. Use **Import Settings** to restore this later or modify advanced flags."
         )
         try:
             export_path.unlink()
@@ -1328,7 +1493,6 @@ async def handle_callbacks(client, query: CallbackQuery):
         )
         return
 
-    # ---------- Upload Mode Selection (/translate flow) ----------
     if data.startswith("uploadmode_"):
         mode = data.split("_", 1)[1]
         pending_files[user_id] = {"mode": mode, "files": [], "collecting": True}
@@ -1341,7 +1505,6 @@ async def handle_callbacks(client, query: CallbackQuery):
         await safe_edit(query.message, f"📥 **Upload mode:** `{mode}`\n{hint}")
         return
 
-    # ---------- Job Pipeline Controls ----------
     if data == "start_pipeline":
         await safe_edit(query.message, "🔄 Initializing translation pipeline...")
         active_jobs[user_id] = {"cancel": False, "status_msg": query.message}
@@ -1377,9 +1540,8 @@ async def handle_callbacks(client, query: CallbackQuery):
 @app.on_message((filters.document | filters.photo) & auth_filter)
 async def receive_files(client, message: Message):
     user_id = message.from_user.id
-
-    # Case 1: user is uploading a font (triggered via Font Track > Add Font)
     pending_reply = awaiting_reply.get(user_id)
+
     if pending_reply and pending_reply["type"] == "font_upload" and message.document:
         doc_name = message.document.file_name or ""
         if not doc_name.lower().endswith((".ttf", ".otf")):
@@ -1395,7 +1557,6 @@ async def receive_files(client, message: Message):
         await message.reply_text(f"✅ Font `{doc_name}` added to library and selected.", reply_markup=kb_font_menu(cfg))
         return
 
-    # Case 1b: user is importing a settings JSON (triggered via Backup > Import)
     if pending_reply and pending_reply["type"] == "settings_import" and message.document:
         doc_name = message.document.file_name or ""
         if not doc_name.lower().endswith(".json"):
@@ -1408,8 +1569,15 @@ async def receive_files(client, message: Message):
             try:
                 with open(dest, "r") as f:
                     imported = json.load(f)
+            except json.JSONDecodeError as e:
+                await message.reply_text(
+                    f"❌ Invalid JSON — not imported.\n"
+                    f"{e.msg} at line {e.lineno}, column {e.colno} (char {e.pos}).\n"
+                    f"Fix the file and re-upload; nothing was changed."
+                )
+                return
             except Exception as e:
-                await message.reply_text(f"❌ Couldn't parse that JSON file: `{e}`")
+                await message.reply_text(f"❌ Couldn't read that file: {e}\nNothing was imported.")
                 return
 
         if not isinstance(imported, dict):
@@ -1417,23 +1585,31 @@ async def receive_files(client, message: Message):
             return
 
         awaiting_reply.pop(user_id, None)
-        # Merge onto a fresh default config so any keys missing from the
-        # imported file (e.g. an older export, or a hand-edited partial file)
-        # fall back safely instead of raising a KeyError later in the pipeline.
         merged = default_config()
-        merged.update(imported)
+        unknown_keys = [k for k in imported.keys() if k not in merged]
+        known_imported = {k: v for k, v in imported.items() if k in merged}
+        merged.update(known_imported)
+        cleared = sanitize_cfg_values(merged)
         user_settings[str(user_id)] = merged
         await save_user_config(user_id)
         cfg = get_user_config(user_id)
-        await message.reply_text(
-            "✅ **Settings imported and applied.**\n"
-            "Note: fonts and prompt library text referenced by name still need "
-            "to exist in this bot's library — re-upload/re-add them if missing.",
-            reply_markup=kb_main_menu(cfg)
+        report_lines = ["✅ **Settings imported and applied.**"]
+        if cleared:
+            report_lines.append("\n⚠️ **Invalid values were reset to default:**")
+            for field, bad_value in cleared:
+                allowed = ", ".join(sorted(VALID_CHOICES[field]))
+                report_lines.append(f"• `{field}` = `{bad_value}` → not a valid choice (allowed: {allowed})")
+        if unknown_keys:
+            shown = ", ".join(unknown_keys[:10])
+            more = " ..." if len(unknown_keys) > 10 else ""
+            report_lines.append(f"\nℹ️ Ignored {len(unknown_keys)} unrecognized key(s): `{shown}`{more}")
+        report_lines.append(
+            "\nNote: fonts and prompt library text referenced by name still need "
+            "to exist in this bot's library — re-upload/re-add them if missing."
         )
+        await message.reply_text("\n".join(report_lines), reply_markup=kb_main_menu(cfg))
         return
 
-    # Case 2: user is collecting files for a translation job
     queue = pending_files.get(user_id)
     if not queue or not queue.get("collecting"):
         await message.reply_text("ℹ️ Send `/translate` first and select an upload type.")
@@ -1494,7 +1670,6 @@ async def handle_reply_capture(client, message: Message):
             "hyphen_penalty": "Hyphen Penalty",
             "hyphenation_min_word_length": "Hyphenation Min Word Length",
         }.get(field, field)
-        # Which submenu to return the confirmation keyboard to.
         font_fields = {"min_font_size", "max_font_size", "line_spacing_mult"}
         back_kb = kb_appear_font_menu(cfg) if field in font_fields else kb_appear_layout_menu(cfg)
 
@@ -1516,7 +1691,6 @@ async def handle_reply_capture(client, message: Message):
             await message.reply_text(f"❌ Please reply with {hint}, or `default` to reset. Try again.")
             return
 
-        # Range checks based on the engine's documented valid ranges.
         range_checks = {
             "supersampling_factor": (1, 4),
             "badness_exponent": (2, 4),
@@ -1530,7 +1704,6 @@ async def handle_reply_capture(client, message: Message):
                 await message.reply_text(f"❌ {pretty} should be between {lo} and {hi}. Try again.")
                 return
 
-        # Sanity check: min shouldn't exceed max and vice versa, if both are set.
         if field in ("min_font_size", "max_font_size"):
             other_field = "max_font_size" if field == "min_font_size" else "min_font_size"
             other_value = cfg.get(other_field)
@@ -1547,6 +1720,38 @@ async def handle_reply_capture(client, message: Message):
         awaiting_reply.pop(user_id, None)
         await message.reply_text(f"✅ {pretty} set to `{value}`.", reply_markup=back_kb)
         return
+    if kind == "xf_field":
+        key = pending_reply["extra"]["key"]
+        meta = FIELD_REGISTRY[key]
+        group = meta["group"]
+        back_kb = kb_field_group_menu(cfg, group)
+
+        if text.lower() == "default":
+            cfg[key] = None
+            await save_user_config(user_id)
+            awaiting_reply.pop(user_id, None)
+            await message.reply_text(f"✅ {meta['label']} reset to Original/Default.", reply_markup=back_kb)
+            return
+
+        argtype = meta["argtype"]
+        try:
+            if argtype == "int":
+                value = int(text)
+            elif argtype == "float":
+                value = float(text)
+            else:
+                value = text
+        except ValueError:
+            hint = meta["hint"] or ("a whole number" if argtype == "int" else "a decimal number")
+            await message.reply_text(f"❌ Please reply with {hint}, or `default` to reset. Try again.")
+            return
+
+        cfg[key] = value
+        await save_user_config(user_id)
+        awaiting_reply.pop(user_id, None)
+        await message.reply_text(f"✅ {meta['label']} set to `{value}`.", reply_markup=back_kb)
+        return
+
 
     if kind == "detect_field":
         field = pending_reply["extra"]["field"]
@@ -1606,8 +1811,6 @@ async def handle_reply_capture(client, message: Message):
             await message.reply_text(f"❌ Please reply with {hint}, or `default` to reset. Try again.")
             return
 
-        # Sanity check: trigger height should be >= tile height, otherwise
-        # tiling would kick in on pages shorter than a single planned tile.
         if field in ("tile_height", "tile_trigger_height"):
             other_field = "tile_trigger_height" if field == "tile_height" else "tile_height"
             other_value = cfg.get(other_field)
@@ -1665,8 +1868,6 @@ async def handle_reply_capture(client, message: Message):
             )
             return
 
-        # Accumulate this chunk and keep waiting — this also transparently handles the
-        # case where Telegram itself split one long paste into multiple messages.
         parts.append(text)
         total_len = sum(len(p) for p in parts)
         await message.reply_text(
@@ -1676,7 +1877,7 @@ async def handle_reply_capture(client, message: Message):
         return
 
 # ================= Job State for Pause/Resume =================
-paused_jobs = {}  # user_id -> {"translated_dir":..., "queue":[...], "current_index":..., "settings":..., "total_images":...}
+paused_jobs = {} 
 
 BASE_STAGING = str(BASE_DIR / "workspace")
 
@@ -1697,17 +1898,8 @@ def extract_archive(path, dest_dir):
         zip_ref.extractall(dest_dir)
 
 def extract_pdf(path, dest_dir):
-    """
-    Pure-Python PDF page extraction using PyMuPDF (fitz).
-    Replaces the old `pdftoppm` shell-out, which used to hang or silently
-    fail on headless runners where poppler-utils was missing/misconfigured
-    or the PDF had complex/multi-layered content.
-    Pages are rendered at ~200 DPI and saved as flat RGB .jpg frames
-    (alpha=False) since the OCR/vision translation model doesn't need an
-    alpha channel and .jpg keeps payload size down for the LLM.
-    """
-    import fitz  # PyMuPDF
-    zoom = 200 / 72  # fitz default is 72 DPI; scale up to ~200 DPI
+    import fitz  
+    zoom = 200 / 72  
     mat = fitz.Matrix(zoom, zoom)
     doc = fitz.open(path)
     try:
@@ -1724,16 +1916,6 @@ def _natural_key(name):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', name)]
 
 def _stitch_group_vertically(input_dir, base_name, slice_files):
-    """
-    Stitches multiple narrow-strip slices (e.g. 001__001.jpg, 001__002.jpg) that
-    together represent ONE logical manhwa page back into a single tall image.
-    This fixes two problems caused by treating each slice as an independent page:
-      1. Chaotic aspect ratios / extreme zoom-in on the compiled output.
-      2. Text bubbles that were cut in half across two slices breaking OCR
-         segmentation, since the model never saw the full bubble in one frame.
-    Slices are sorted naturally (so 001__2 comes before 001__10) and pasted
-    top-to-bottom using PIL with running y_offset accumulation.
-    """
     from PIL import Image
     slice_files = sorted(slice_files, key=_natural_key)
     imgs = [Image.open(os.path.join(input_dir, f)).convert("RGB") for f in slice_files]
@@ -1742,7 +1924,6 @@ def _stitch_group_vertically(input_dir, base_name, slice_files):
     stitched = Image.new("RGB", (total_width, total_height), (255, 255, 255))
     y_offset = 0
     for im in imgs:
-        # Center narrower slices horizontally so stitched pages stay visually aligned.
         x_offset = (total_width - im.width) // 2
         stitched.paste(im, (x_offset, y_offset))
         y_offset += im.height
@@ -1759,13 +1940,6 @@ def _stitch_group_vertically(input_dir, base_name, slice_files):
     return out_name
 
 def stitch_sliced_images(input_dir):
-    """
-    Scans a flat directory for scraped-manhwa-style sliced filenames using the
-    `<page>__<slice>.<ext>` convention (e.g. 001__001.jpg, 001__002.jpg) and
-    stitches each group of slices back into one tall page before the images
-    ever reach the translator core. Files that don't match the pattern (i.e.
-    already-whole pages) are left untouched.
-    """
     all_files = [f for f in os.listdir(input_dir) if f.lower().endswith(IMAGE_EXTS)]
     groups = {}
     singles = []
@@ -1780,12 +1954,8 @@ def stitch_sliced_images(input_dir):
     for base, slice_files in groups.items():
         if len(slice_files) > 1:
             _stitch_group_vertically(input_dir, base, slice_files)
-        # A "group" of exactly one slice is just a normal page with an
-        # incidental "__" in its name - leave it as-is, no stitching needed.
 
 def flatten_and_order(input_dir, content_type="manhwa", cfg=None):
-    """Move nested images to root, stitch sliced strips, sort naturally, rename to 001,002... ordering.
-    Returns (ordered_map, tile_manifest). tile_manifest is None unless tiling was applied."""
     for root, _, files in os.walk(input_dir, topdown=False):
         for f in files:
             if f.lower().endswith(IMAGE_EXTS):
@@ -1796,9 +1966,6 @@ def flatten_and_order(input_dir, content_type="manhwa", cfg=None):
             except Exception:
                 pass
 
-    # Stitch scraped narrow-strip Manhwa slices (e.g. 001__001.jpg, 001__002.jpg)
-    # back into single full pages before ordering/renaming, so the translator
-    # core sees one coherent page per file instead of fragments.
     stitch_sliced_images(input_dir)
 
     images = sorted([f for f in os.listdir(input_dir) if f.lower().endswith(IMAGE_EXTS)], key=_natural_key)
@@ -1817,47 +1984,13 @@ def flatten_and_order(input_dir, content_type="manhwa", cfg=None):
     return ordered_map, tile_manifest
 
 # ================= Long-Strip Tiling (Manhwa) =================
-# Root cause of "no speech bubbles detected" on stitched Manhwa strips:
-# YOLO detectors resize the whole image down to a fixed input resolution
-# (commonly 640-1280px on the longest side) before running inference. A
-# stitched webtoon page that's 10,000-16,000px tall gets crushed down so
-# hard that speech bubbles shrink to a handful of pixels - well below what
-# the detector can resolve, so it reports zero bubbles even though they're
-# clearly visible to a human. The fix used by real webtoon translation
-# tools: slice the tall page into overlapping windows sized close to the
-# detector's native resolution, run detection/translation per window, then
-# recompose the translated windows back into one tall page. The overlap
-# (MANHWA_TILE_OVERLAP) ensures a bubble that straddles a cut line still
-# appears whole in at least one tile.
-
 def _compute_row_flatness(im):
-    """
-    Returns a numpy array of per-row standard deviation (lower = flatter/more
-    uniform = safer to cut on - a gutter between panels, or plain background
-    around a bubble, rather than the middle of bubble text, an outline, or
-    dense artwork).
-    """
     import numpy as np
     gray = im.convert("L")
     arr = np.asarray(gray, dtype=np.float32)
     return arr.std(axis=1)
 
-def _find_safe_cut_row(row_flatness, target_y, search_window, min_y, max_y,
-                        flat_threshold=MANHWA_SAFE_CUT_FLAT_THRESHOLD):
-    """
-    Finds a cut row near target_y that avoids slicing through a bubble.
-    Strategy:
-      1. If target_y itself is already flat enough, use it.
-      2. Otherwise scan outward within +/- search_window for the nearest row
-         that clears the (strict) flatness threshold.
-      3. If NOTHING in the window clears the threshold, return None instead
-         of forcing a cut on the "least bad" row. A row that fails the
-         threshold is not confirmed blank - it may just be a lighter part of
-         a bubble or a soft gradient background, and cutting there is
-         exactly what let duplicated text slip through before. The caller
-         (tile_tall_pages) is responsible for extending the tile taller and
-         searching again rather than accepting a risky cut.
-    """
+def _find_safe_cut_row(row_flatness, target_y, search_window, min_y, max_y, flat_threshold=MANHWA_SAFE_CUT_FLAT_THRESHOLD):
     if row_flatness[target_y] < flat_threshold:
         return target_y
     for delta in range(1, search_window + 1):
@@ -1867,35 +2000,14 @@ def _find_safe_cut_row(row_flatness, target_y, search_window, min_y, max_y,
             return down
         if up >= min_y and row_flatness[up] < flat_threshold:
             return up
-    return None  # no confirmed-safe row nearby - caller must extend, not force
+    return None  
 
 def tile_tall_pages(input_dir, ordered_map, cfg=None):
-    """
-    For every page taller than the trigger height, slice it into
-    tiles saved as `{page}_tile{n}.jpg` and remove the original tall page.
-
-    Unlike naive fixed-height slicing, cut lines are snapped to nearby
-    "safe" rows (flat/blank background between bubbles or panels) found by
-    scanning the ORIGINAL (untranslated) image. This avoids the duplicate-
-    text bug that a fixed-overlap-then-crop approach produces: if a tile
-    boundary lands inside a speech bubble, the translator renders that whole
-    bubble in BOTH tiles independently, and a blind pixel-offset crop can't
-    tell where the real bubble edges are, so the text visibly repeats after
-    recomposition. Cutting only on blank rows means no bubble/panel is ever
-    split across two tiles in the first place, so tiles can be joined with a
-    plain edge-to-edge stitch and no overlap/crop guesswork is needed.
-
-    Returns a manifest dict:
-        { page_idx: {"tiles": [tile_filename, ...], "heights": [...],
-                     "width": px, "original_height": px, "original_name": ...} }
-    Pages at/under the trigger height are left completely untouched and are
-    absent from the manifest.
-    """
     from PIL import Image
 
     cfg = cfg or {}
     if cfg.get("tile_enabled") is False:
-        return {}  # user has explicitly disabled tiling entirely
+        return {} 
 
     tile_height = cfg.get("tile_height") or MANHWA_TILE_HEIGHT
     tile_search_radius = cfg.get("tile_search_radius") or MANHWA_TILE_OVERLAP
@@ -1910,38 +2022,47 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
         with Image.open(path) as im:
             width, height = im.size
             if height <= tile_trigger_height:
-                continue  # short enough for the detector as-is, skip tiling
+                continue  
 
             im = im.convert("RGB")
             row_flatness = _compute_row_flatness(im)
-            search_window = tile_search_radius  # +/- search radius around each target cut
+            search_window = tile_search_radius  
 
             tile_files = []
             tile_heights = []
-            forced_cut_rows = []  # kept for compatibility with recompose_tiled_page's seam-duplicate check; always stays empty now
+            forced_cut_rows = []  # cuts that landed on non-flat (likely mid-art/mid-bubble) rows
             y = 0
             tile_n = 0
+            max_extend_attempts = 6  # cap the widening search so we don't loop forever on noisy art
             while y < height:
                 target_bottom = min(y + tile_height, height)
                 if target_bottom >= height:
                     cut = height
+                    was_forced = False
                 else:
                     cut = _find_safe_cut_row(row_flatness, target_bottom, search_window, y + 1, height - 1, tile_flat_threshold)
-                    # No confirmed-safe row near the target - keep pushing the
-                    # search target further down in tile_search_radius-sized
-                    # steps and searching again. There is no ceiling on this:
-                    # a taller-than-planned tile is always safer than a cut
-                    # that lands inside artwork or a speech bubble, so in the
-                    # worst case this simply walks all the way to the bottom
-                    # of the page and the "tile" ends up being the whole
-                    # remaining page (equivalent to tiling not applying here).
+                    was_forced = cut is None
                     extended_target = target_bottom
-                    while cut is None and extended_target < height:
+                    attempts = 0
+                    while cut is None and extended_target < height and attempts < max_extend_attempts:
                         extended_target = min(extended_target + tile_search_radius, height)
+                        attempts += 1
                         if extended_target >= height:
                             cut = height
+                            was_forced = False  # cutting at the true bottom of the strip is fine
                             break
                         cut = _find_safe_cut_row(row_flatness, extended_target, search_window, y + 1, height - 1, tile_flat_threshold)
+                        if cut is not None:
+                            was_forced = False
+                    if cut is None:
+                        # Never found a flat row even after widening the search — fall back to
+                        # the original target and flag it, since this cut may slice through
+                        # a bubble/panel and cause duplicated or clipped content at the seam.
+                        cut = target_bottom
+                        was_forced = True
+
+                if was_forced:
+                    forced_cut_rows.append(cut)
 
                 tile = im.crop((0, y, width, cut))
                 tile_name = f"{os.path.splitext(fname)[0]}_tile{tile_n:03d}.jpg"
@@ -1959,37 +2080,21 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
                 "width": width,
                 "original_height": height,
                 "original_name": fname,
-                "forced_cut_rows": forced_cut_rows,  # cuts made without a confirmed-safe row
+                "forced_cut_rows": forced_cut_rows,  
             }
-        os.remove(path)  # replaced by its tiles
+        os.remove(path)  
     return manifest
 
-# How many rows above/below a seam to compare when checking for duplicated
-# content. A duplicated bubble typically repeats a solid block of rows, not
-# just a couple of pixels, so this window is wide enough to catch that while
-# staying cheap to compute.
 SEAM_CHECK_BAND_PX = 40
-# If the mean absolute pixel difference between the band just above a seam
-# and the band just below it is under this value, the two bands are treated
-# as visually near-identical - a strong signal of duplicated content rather
-# than two genuinely different rows of art.
 SEAM_DUPLICATE_DIFF_THRESHOLD = 6.0
 
 def _seam_looks_duplicated(recomposed_im, seam_y, band_px=SEAM_CHECK_BAND_PX, diff_threshold=SEAM_DUPLICATE_DIFF_THRESHOLD):
-    """
-    Compares the band of rows just above vs. just below a seam for
-    near-identical content, which would indicate the same bubble/text got
-    rendered on both sides of a tile boundary. Returns True if a duplicate is
-    suspected. Only meaningful at seams that came from a forced cut (no
-    confirmed-safe row was found originally) - safe cuts should never trigger
-    this, since they were already confirmed to sit on blank rows.
-    """
     import numpy as np
     width, height = recomposed_im.size
     top = max(0, seam_y - band_px)
     bottom = min(height, seam_y + band_px)
     if bottom - top < band_px * 2:
-        return False  # too close to page edge to compare meaningfully
+        return False  
     region = recomposed_im.crop((0, top, width, bottom)).convert("L")
     arr = np.asarray(region, dtype=np.float32)
     upper_band = arr[:band_px]
@@ -2000,26 +2105,6 @@ def _seam_looks_duplicated(recomposed_im, seam_y, band_px=SEAM_CHECK_BAND_PX, di
     return diff < diff_threshold
 
 def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None):
-    """
-    Stitches translated tile outputs back into one tall page image with a
-    plain edge-to-edge join (no overlap trimming needed): tiles were cut on
-    safe/blank rows in the original image, so no bubble or panel spans two
-    tiles, and each tile's full height can be pasted back exactly where it
-    came from without any risk of duplicated text at the seams.
-
-    As a final safety net, seams that came from a "forced" cut (tile_manifest
-    recorded no confirmed-safe row nearby, see tile_tall_pages) are checked
-    for duplicated content after recomposition. If a duplicate is detected,
-    this returns ("duplicate_suspected", flagged_seam_rows) instead of
-    silently shipping a page that likely has repeated text - the caller
-    should surface this to the user rather than send it.
-
-    Returns:
-      - (output_path, []) on a clean recompose
-      - (output_path, [flagged_y, ...]) if forced-cut seams look suspicious
-        (page is still saved/returned so the caller can decide what to do)
-      - None if any translated tile is missing entirely
-    """
     from PIL import Image
     cfg = cfg or {}
     seam_band_px = cfg.get("tile_seam_band_px") or SEAM_CHECK_BAND_PX
@@ -2041,17 +2126,15 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None):
                 found = candidate
                 break
         if found is None:
-            return None  # a tile failed to translate - don't silently ship a gap
+            return None  
         translated_tile_paths.append(found)
 
     recomposed = Image.new("RGB", (width, total_height), (255, 255, 255))
-    seam_ys = []  # y-position of each join, in the recomposed page's coordinates
+    seam_ys = []  
     y_cursor = 0
     for i, tile_path in enumerate(translated_tile_paths):
         with Image.open(tile_path) as tile_im:
             tile_im = tile_im.convert("RGB")
-            # Resize defensively in case the translator's render stage changed
-            # tile dimensions slightly (e.g. rounding during upscale/cleanup).
             if tile_im.size != (width, heights[i]):
                 tile_im = tile_im.resize((width, heights[i]))
             recomposed.paste(tile_im, (0, y_cursor))
@@ -2059,13 +2142,16 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None):
             if i < len(translated_tile_paths) - 1:
                 seam_ys.append(y_cursor)
 
-    # Only check seams that correspond to a forced cut - safe cuts were
-    # already confirmed blank in the original image and don't need re-checking.
+    # Check every seam for duplicated/misaligned content, not just seams that were
+    # forced through non-flat rows. Even a "safe" flat-row cut can look duplicated
+    # after inpainting/redrawing shifts art slightly, so this can't be skipped —
+    # forced cuts just get a slightly wider tolerance since they're higher-risk.
     flagged_seams = []
     for seam_y in seam_ys:
-        if any(abs(seam_y - forced_y) <= 2 for forced_y in forced_cut_rows):
-            if _seam_looks_duplicated(recomposed, seam_y, band_px=seam_band_px, diff_threshold=seam_diff_threshold):
-                flagged_seams.append(seam_y)
+        was_forced = any(abs(seam_y - forced_y) <= 2 for forced_y in forced_cut_rows)
+        effective_threshold = seam_diff_threshold * (1.4 if was_forced else 1.0)
+        if _seam_looks_duplicated(recomposed, seam_y, band_px=seam_band_px, diff_threshold=effective_threshold):
+            flagged_seams.append(seam_y)
 
     out_name = manifest_entry["original_name"]
     out_path = os.path.join(translated_dir, out_name)
@@ -2085,23 +2171,7 @@ def build_dynamic_system_instruction(cfg):
         f"Produce strictly the final targeted localization stream mapping blocks directly."
     )
 
-def resolve_font_path(cfg):
-    if cfg.get("font_name"):
-        p = FONTS_DIR / cfg["font_name"]
-        if p.exists():
-            return str(p.parent)
-    return str(FONTS_DIR)
-
-# ================= MangaTranslator CLI Capability Detection =================
-# The upstream fork's flag names occasionally shift between versions (e.g.
-# --target-language vs --output-language). Rather than hardcoding a guess and
-# risking another "unrecognized arguments" crash, we introspect `main.py --help`
-# once per process and cache which flags actually exist, then only pass flags
-# the installed version supports. This also lets us safely opt in to OSB
-# (Outside Speech Bubble) detection when available, which is what most
-# scraped Manhwa needs - dialogue/narration/SFX sitting outside bubble shapes
-# is invisible to the default bubble-only YOLO detector, which is why some
-# pages come back as "no speech bubbles or outside text detected".
+# ================= MangaTranslator CLI Mappings =================
 _cli_help_cache = {"text": None}
 
 def _get_main_help_text():
@@ -2119,6 +2189,54 @@ def _get_main_help_text():
 def cli_supports_flag(flag):
     return flag in _get_main_help_text()
 
+# Master CLI Flag Mapper
+CLI_MAPPINGS = {
+    "min_font_size": ("--min-font-size", "val"), "max_font_size": ("--max-font-size", "val"),
+    "line_spacing_mult": ("--line-spacing-mult", "val"), "padding_pixels": ("--padding-pixels", "val"),
+    "supersampling_factor": ("--supersampling-factor", "val"), "font_hinting": ("--font-hinting", "val"),
+    "auto_vertical_text": ("--auto-vertical-text", "bool_true"), "use_ligatures": ("--use-ligatures", "bool_true"),
+    "subpixel_rendering": ("--no-subpixel-rendering", "bool_invert"), "hyphenate_before_scaling": ("--no-hyphenate-before-scaling", "bool_invert"),
+    "detach_trailing_punctuation": ("--no-detach-trailing-punctuation", "bool_invert"), "hyphen_penalty": ("--hyphen-penalty", "val"),
+    "hyphenation_min_word_length": ("--hyphenation-min-word-length", "val"), "badness_exponent": ("--badness-exponent", "val"),
+    "temperature": ("--temperature", "val"), "top_p": ("--top-p", "val"), "top_k": ("--top-k", "val"),
+    "max_tokens": ("--max-tokens", "val"), "translation_mode": ("--translation-mode", "val"),
+    "use_custom_sampling": ("--no-custom-sampling", "bool_invert"), "ocr_method": ("--ocr-method", "val"),
+    "reasoning_effort": ("--reasoning-effort", "val"), "effort": ("--effort", "val"), "verbosity": ("--verbosity", "val"),
+    "reading_direction": ("--reading-direction", "val"), "enable_web_search": ("--enable-web-search", "bool_true"),
+    "enable_code_execution": ("--enable-code-execution", "bool_true"), "media_resolution": ("--media-resolution", "val"),
+    "media_resolution_bubbles": ("--media-resolution-bubbles", "val"), "media_resolution_context": ("--media-resolution-context", "val"),
+    "image_detail": ("--image-detail", "val"), "send_full_page_context": ("--no-full-page-context", "bool_invert"),
+    "confidence": ("--confidence", "val"), "conjoined_confidence": ("--conjoined-confidence", "val"),
+    "panel_confidence": ("--panel-confidence", "val"), "seg_model": ("--seg-model", "val"),
+    "bubble_detector_model": ("--bubble-detector-model", "val"), "conjoined_detection": ("--no-conjoined-detection", "bool_invert"),
+    "inpaint_colored_bubbles": ("--inpaint-colored-bubbles", "bool_true"), "use_otsu_threshold": ("--use-otsu-threshold", "bool_true"),
+    "thresholding_value": ("--thresholding-value", "val"), "roi_shrink_px": ("--roi-shrink-px", "val"),
+    "whiteout_conjoined_bubbles": ("--no-whiteout-conjoined-bubbles", "bool_invert"), "upscale_method": ("--upscale-method", "val"),
+    "image_upscale_mode": ("--image-upscale-mode", "val"), "image_upscale_factor": ("--image-upscale-factor", "val"),
+    "jpeg_quality": ("--jpeg-quality", "val"), "png_compression": ("--png-compression", "val"),
+    "auto_scale": ("--no-auto-scale", "bool_invert"), "bubble_min_side_pixels": ("--bubble-min-side-pixels", "val"),
+    "context_image_max_side_pixels": ("--context-image-max-side-pixels", "val"), "parallel_requests": ("--parallel-requests", "val"),
+    "batch_parallel_within_pages": ("--batch-parallel-within-pages", "bool_true"), "batch_previous_context_images": ("--batch-previous-context-images", "val"),
+    "batch_previous_context_texts": ("--batch-previous-context-texts", "val"), "verbose": ("--verbose", "bool_true"),
+    "cpu": ("--cpu", "bool_true"), "cleaning_only": ("--cleaning-only", "bool_true"), "upscaling_only": ("--upscaling-only", "bool_true"),
+    "test_mode": ("--test-mode", "bool_true"), "osb_inpainting_method": ("--osb-inpainting-method", "val"),
+    "osb_flux_backend": ("--osb-flux-backend", "val"), "osb_flux_low_vram": ("--osb-flux-low-vram", "bool_true"),
+    "osb_flux_sdcpp_cache_mode": ("--osb-flux-sdcpp-cache-mode", "val"), "osb_flux_sdcpp_diffusion_quant": ("--osb-flux-sdcpp-diffusion-quant", "val"),
+    "osb_flux_sdcpp_text_encoder_quant": ("--osb-flux-sdcpp-text-encoder-quant", "val"), "osb_flux_upscale_small_crops": ("--osb-no-flux-upscale-small-crops", "bool_invert"),
+    "osb_flux_group_regions": ("--osb-flux-group-regions", "bool_true"), "osb_flux_steps": ("--osb-flux-steps", "val"),
+    "osb_flux_luminance_correction": ("--osb-no-luminance-correction", "bool_invert"), "osb_flux_residual_threshold": ("--osb-flux-residual-threshold", "val"),
+    "osb_seed": ("--osb-seed", "val"), "osb_max_font_size": ("--osb-max-font-size", "val"),
+    "osb_min_font_size": ("--osb-min-font-size", "val"), "osb_use_ligatures": ("--osb-use-ligatures", "bool_true"),
+    "osb_outline_width": ("--osb-outline-width", "val"), "osb_line_spacing": ("--osb-line-spacing", "val"),
+    "osb_use_subpixel": ("--osb-use-subpixel", "bool_true"), "osb_font_hinting": ("--osb-font-hinting", "val"),
+    "osb_bbox_expansion": ("--osb-bbox-expansion", "val"), "osb_render_expansion_narrow": ("--osb-render-expansion-narrow", "val"),
+    "osb_render_expansion_tiny": ("--osb-render-expansion-tiny", "val"), "osb_render_expansion_aspect_threshold": ("--osb-render-expansion-aspect-threshold", "val"),
+    "osb_render_expansion_area_threshold": ("--osb-render-expansion-area-threshold", "val"), "osb_text_box_proximity_ratio": ("--osb-text-box-proximity-ratio", "val"),
+    "osb_confidence": ("--osb-confidence", "val"), "osb_filter_page_numbers": ("--osb-filter-page-numbers", "bool_true"),
+    "osb_page_filter_margin": ("--osb-page-filter-margin", "val"), "osb_page_filter_min_area": ("--osb-page-filter-min-area", "val"),
+    "osb_min_area_ignore_ratio": ("--osb-min-area-ignore-ratio", "val"), "osb_min_side_pixels": ("--osb-min-side-pixels", "val")
+}
+
 # ================= Main Pipeline Runner =================
 async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
     cfg = get_user_config(user_id)
@@ -2129,12 +2247,6 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
         active_jobs.pop(user_id, None)
         return
 
-    # Novel content type is text-only prose with no bubbles/panels - running
-    # it through the bubble-detection/inpainting/render pipeline would just
-    # burn API calls trying to detect speech bubbles that don't exist, and
-    # likely produce garbage output. Until a dedicated text-only OCR+translate
-    # path is built, we stop here with a clear explanation rather than
-    # silently shipping a broken or wasteful result.
     if cfg.get("content_type") == "novel":
         await safe_edit(
             status_msg,
@@ -2164,20 +2276,19 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
     os.makedirs(translated_dir, exist_ok=True)
     os.makedirs(font_dir_for_run, exist_ok=True)
 
-    # copy selected font into the run's font dir so main.py picks it up
     if cfg.get("font_name"):
         src_font = FONTS_DIR / cfg["font_name"]
         if src_font.exists():
             shutil.copy(src_font, font_dir_for_run)
 
     total_files = len(files)
-    all_translated_outputs = []  # list of (index, output_path) to send in order at the end
-    failure_reasons = []  # list of (file_idx, reason_text) for files that produced no output
+    all_translated_outputs = []  
+    failure_reasons = []  
     resume_from = paused_jobs.pop(user_id, {}).get("stopped_at_file") or 1
 
     for file_idx, source_message in enumerate(files, start=1):
         if file_idx < resume_from:
-            continue  # already completed & sent before pause
+            continue  
 
         job = active_jobs.get(user_id)
         if job and job["cancel"]:
@@ -2190,9 +2301,6 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
         await safe_edit(status_msg, build_status_text(mode_label, "📥 Downloading payload", file_idx, total_files, 0, 0, 5))
         downloaded_path = await source_message.download(file_name=os.path.join(job_root, f"src_{file_idx:03d}"))
 
-        # Renaming: pyrogram doesn't always preserve/add an extension, so fix it explicitly.
-        # - message.document: use its original filename's extension.
-        # - message.photo: Telegram compresses photos to JPEG, so force .jpg.
         if source_message.document and source_message.document.file_name:
             ext = os.path.splitext(source_message.document.file_name)[1] or ".jpg"
         elif source_message.photo:
@@ -2205,7 +2313,6 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             os.rename(downloaded_path, fixed_path)
             downloaded_path = fixed_path
 
-        # Extraction based on mode
         await safe_edit(status_msg, build_status_text(mode_label, "📂 Extracting", file_idx, total_files, 0, 0, 15))
         if mode == "archive" or downloaded_path.lower().endswith(('.zip', '.cbz')):
             extract_archive(downloaded_path, input_dir)
@@ -2228,18 +2335,10 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
                 status_msg,
                 build_status_text(mode_label, f"✂️ Tiling {tiled_pages} tall page(s) into {total_tiles} tile(s) for detection", file_idx, total_files, 0, total_images, 20)
             )
-            # total_images now reflects tiles-on-disk in input_dir (original tall
-            # pages were removed and replaced by their tiles), so re-count for
-            # accurate progress reporting during the translation stage below.
             total_images = len([f for f in os.listdir(input_dir) if f.lower().endswith(IMAGE_EXTS)])
 
         dynamic_system_instruction = build_dynamic_system_instruction(cfg)
 
-        # Build a per-subprocess environment instead of mutating the shared
-        # os.environ of the bot process. With multiple users' jobs running
-        # concurrently (asyncio tasks interleave while awaiting the subprocess),
-        # writing to os.environ directly meant one user's API key/language
-        # could leak into another user's in-flight translation job.
         subprocess_env = os.environ.copy()
         subprocess_env['INPUT_LANG'] = cfg['source_lang']
         subprocess_env['PROVIDER'] = cfg['provider']
@@ -2258,15 +2357,6 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             "--batch",
             "--font-dir", font_dir_for_run,
             "--input-language", cfg['source_lang'],
-            # Explicitly declared, mapped to the active user config. Without
-            # this flag, MangaTranslator silently defaulted its internal
-            # target-language tracking to English, which then conflicted with
-            # the Roman Hindi/Urdu instruction baked into the prompt and made
-            # the model emit BOTH strings ("English || Localized") in one
-            # bubble. That bloated the token payload and triggered
-            # "Text too large for bubble" render-overflow failures.
-            # NOTE: MangaTranslator's actual CLI flag is `--output-language`,
-            # not `--target-language` (confirmed against upstream --help).
             "--output-language", cfg['target_lang'],
             "--provider", cfg['provider'],
             "--openai-compatible-url", cfg['api_url'],
@@ -2275,82 +2365,35 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             "--special-instructions", dynamic_system_instruction
         ]
 
-        # Detection settings (YOLO/OCR) - all optional. If the user never
-        # touched the Detection Settings menu, every one of these stays None
-        # and nothing is added to cmd, so behaviour is byte-for-byte identical
-        # to before this feature existed ("Original/Default"). Flag names
-        # verified directly against MangaTranslator/main.py's argparse
-        # definitions. Guarded with cli_supports_flag() in case a different
-        # fork/version is installed without them.
-        if cfg.get("confidence") is not None and cli_supports_flag("--confidence"):
-            cmd += ["--confidence", str(cfg["confidence"])]
-        if cfg.get("conjoined_confidence") is not None and cli_supports_flag("--conjoined-confidence"):
-            cmd += ["--conjoined-confidence", str(cfg["conjoined_confidence"])]
-        if cfg.get("panel_confidence") is not None and cli_supports_flag("--panel-confidence"):
-            cmd += ["--panel-confidence", str(cfg["panel_confidence"])]
-        if cfg.get("seg_model") is not None and cli_supports_flag("--seg-model"):
-            cmd += ["--seg-model", cfg["seg_model"]]
-        # conjoined_detection defaults to True in the engine; only pass the
-        # flag to turn it OFF (there's no "--conjoined-detection-on" flag).
-        if cfg.get("conjoined_detection") is False and cli_supports_flag("--no-conjoined-detection"):
-            cmd.append("--no-conjoined-detection")
-        if cfg.get("bubble_detector_model") is not None and cli_supports_flag("--bubble-detector-model"):
-            cmd += ["--bubble-detector-model", cfg["bubble_detector_model"]]
-        if cfg.get("ocr_method") is not None and cli_supports_flag("--ocr-method"):
-            cmd += ["--ocr-method", cfg["ocr_method"]]
-
-        # OSB = "Outside Speech Bubble" text pipeline. Manhwa frequently has
-        # narration boxes, SFX, and freeform text placed OUTSIDE the drawn
-        # bubble shape - the default YOLO bubble detector only looks INSIDE
-        # bubbles, so those pages come back as "no speech bubbles or outside
-        # text detected" even though they clearly have translatable text.
-        # Only added if the user has it enabled AND this installed fork
-        # actually supports the flag, to avoid another
-        # "unrecognized arguments" crash on forks that don't have it.
         if cfg.get("osb_enabled", True) and cli_supports_flag("--osb-enable"):
             cmd.append("--osb-enable")
             if cli_supports_flag("--osb-font-dir"):
                 cmd += ["--osb-font-dir", font_dir_for_run]
 
-        # Appearance overrides - all optional. If the user never touched the
-        # Appearance menu, every one of these stays None and nothing is added
-        # to cmd, so behaviour is byte-for-byte identical to before this
-        # feature existed ("Original/Default"). Flag names below are verified
-        # directly against MangaTranslator/main.py's argparse definitions.
-        # Still guarded with cli_supports_flag() in case a different
-        # fork/version is installed without them.
-        if cfg.get("min_font_size") is not None and cli_supports_flag("--min-font-size"):
-            cmd += ["--min-font-size", str(cfg["min_font_size"])]
-        if cfg.get("max_font_size") is not None and cli_supports_flag("--max-font-size"):
-            cmd += ["--max-font-size", str(cfg["max_font_size"])]
-        if cfg.get("auto_vertical_text") and cli_supports_flag("--auto-vertical-text"):
-            cmd.append("--auto-vertical-text")
-        if cfg.get("line_spacing_mult") is not None and cli_supports_flag("--line-spacing-mult"):
-            cmd += ["--line-spacing-mult", str(cfg["line_spacing_mult"])]
-        # subpixel_rendering defaults to True in the engine; only pass the flag
-        # to turn it OFF (there's no "--subpixel-rendering-on" flag to set).
-        if cfg.get("subpixel_rendering") is False and cli_supports_flag("--no-subpixel-rendering"):
-            cmd.append("--no-subpixel-rendering")
-        if cfg.get("font_hinting") is not None and cli_supports_flag("--font-hinting"):
-            cmd += ["--font-hinting", cfg["font_hinting"]]
-        if cfg.get("use_ligatures") and cli_supports_flag("--use-ligatures"):
-            cmd.append("--use-ligatures")
-        # hyphenate_before_scaling defaults to True; only pass the flag to turn it OFF.
-        if cfg.get("hyphenate_before_scaling") is False and cli_supports_flag("--no-hyphenate-before-scaling"):
-            cmd.append("--no-hyphenate-before-scaling")
-        if cfg.get("hyphen_penalty") is not None and cli_supports_flag("--hyphen-penalty"):
-            cmd += ["--hyphen-penalty", str(cfg["hyphen_penalty"])]
-        if cfg.get("hyphenation_min_word_length") is not None and cli_supports_flag("--hyphenation-min-word-length"):
-            cmd += ["--hyphenation-min-word-length", str(cfg["hyphenation_min_word_length"])]
-        if cfg.get("badness_exponent") is not None and cli_supports_flag("--badness-exponent"):
-            cmd += ["--badness-exponent", str(cfg["badness_exponent"])]
-        if cfg.get("padding_pixels") is not None and cli_supports_flag("--padding-pixels"):
-            cmd += ["--padding-pixels", str(cfg["padding_pixels"])]
-        if cfg.get("supersampling_factor") is not None and cli_supports_flag("--supersampling-factor"):
-            cmd += ["--supersampling-factor", str(cfg["supersampling_factor"])]
-        # detach_trailing_punctuation defaults to True; only pass the flag to turn it OFF.
-        if cfg.get("detach_trailing_punctuation") is False and cli_supports_flag("--no-detach-trailing-punctuation"):
-            cmd.append("--no-detach-trailing-punctuation")
+        # SAFETY NET: strip any choice-restricted field holding an invalid value
+        # (e.g. a stale/hand-edited translation_mode like "contextual") before it
+        # can reach main.py's argparse and abort the whole job with "invalid choice".
+        last_minute_cleared = sanitize_cfg_values(cfg)
+        if last_minute_cleared:
+            await save_user_config(user_id)
+            bad_list = ", ".join(f"{f}='{v}'" for f, v in last_minute_cleared)
+            await safe_edit(
+                status_msg,
+                f"⚠️ Corrected invalid setting(s) before running: {bad_list} "
+                f"(reset to engine default). Continuing..."
+            )
+
+        # INJECT ALL CUSTOM PARAMETERS
+        for key, config_meta in CLI_MAPPINGS.items():
+            flag, val_type = config_meta
+            val = cfg.get(key)
+            if val is not None and cli_supports_flag(flag):
+                if val_type == "val":
+                    cmd += [flag, str(val)]
+                elif val_type == "bool_true" and val is True:
+                    cmd.append(flag)
+                elif val_type == "bool_invert" and val is False:
+                    cmd.append(flag)
 
         await safe_edit(status_msg, 
             build_status_text(mode_label, "🧠 OCR + Translation running", file_idx, total_files, 0, total_images, 40),
@@ -2362,7 +2405,6 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=subprocess_env
             )
 
-            # Poll loop so cancel is responsive while subprocess runs
             while process.returncode is None:
                 job = active_jobs.get(user_id)
                 if job and job["cancel"]:
@@ -2383,7 +2425,6 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             stdout_text = (stdout_bytes or b"").decode(errors="replace")
             stderr_text = (stderr_bytes or b"").decode(errors="replace")
 
-            # Always dump the engine's own logs to the runner console for full debugging.
             print("----- MangaTranslator stdout -----")
             print(stdout_text)
             print("----- MangaTranslator stderr -----")
@@ -2404,9 +2445,6 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
 
         await safe_edit(status_msg, build_status_text(mode_label, "📦 Packaging output", file_idx, total_files, total_images, total_images, 90))
 
-        # Verify the OCR/translation engine actually produced output before packaging.
-        # Without this check, an empty output folder silently becomes an empty zip
-        # that "successfully" sends, making it look like nothing happened.
         produced_files = []
         if os.path.exists(file_translated_dir):
             produced_files = [f for f in os.listdir(file_translated_dir) if f.lower().endswith(IMAGE_EXTS)]
@@ -2422,11 +2460,6 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             )
             continue
 
-        # If this file had any tall pages that got tiled before translation,
-        # stitch their translated tiles back into single tall pages now. No
-        # overlap trimming is needed - tiles were cut on confirmed-safe rows -
-        # but pages that had a forced cut (no safe row was found) get a final
-        # duplicate check at that seam before shipping.
         if tile_manifest:
             await safe_edit(status_msg, build_status_text(mode_label, "🧵 Recomposing tiled pages", file_idx, total_files, total_images, total_images, 85))
             recompose_failures = []
@@ -2447,9 +2480,6 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
                     f"Continuing with the rest."
                 )
             if duplicate_suspected_pages:
-                # Don't silently ship these - tell the user exactly which
-                # pages to double-check. The page is still included in the
-                # output (better than a gap), just flagged.
                 pages_list = ", ".join(str(p) for p in duplicate_suspected_pages)
                 await safe_edit(
                     status_msg,
@@ -2457,17 +2487,10 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
                     f"page(s) {pages_list} (unusually tall panel with no clean cut point found). "
                     f"Please double-check these pages in the output."
                 )
-            # Re-scan produced_files now that tiles have been merged back down
-            # into full pages, so packaging sees the final page count, not
-            # the intermediate per-tile count.
             produced_files = [f for f in os.listdir(file_translated_dir) if f.lower().endswith(IMAGE_EXTS)]
 
         try:
             if cfg['output_format'] == 'img':
-                # Raw Images mode: all translated raw pages for this file go
-                # into ONE zip, in order, instead of being sent as separate
-                # scattered documents. This keeps "Raw Images" output as a
-                # single downloadable package rather than a flood of files.
                 image_files = sorted(
                     [f for f in os.listdir(file_translated_dir) if f.lower().endswith(IMAGE_EXTS)]
                 )
@@ -2545,12 +2568,9 @@ def package_output(source_dir, job_root, file_idx, output_format):
         shutil.make_archive(archive_base, "zip", source_dir)
         return f"{archive_base}.zip"
     else:
-        # "img" (Raw Images) never reaches here - it's handled separately by sending
-        # each translated image individually. This fallback only covers unknown formats.
         shutil.make_archive(archive_base, "zip", source_dir)
         return f"{archive_base}.zip"
 
-# ================= Cancel / Pause Handling =================
 async def handle_job_cancelled(client, status_msg, user_id, translated_dir, file_idx=None, total_files=None, ordered_map=None):
     paused_jobs[user_id] = {
         "translated_dir": translated_dir,
@@ -2564,7 +2584,6 @@ async def handle_job_cancelled(client, status_msg, user_id, translated_dir, file
     )
 
 async def resume_manga_pipeline(client, status_msg, user_id):
-    # Re-invoke the same pipeline; already-completed files were sent, so re-run from remaining queue.
     await execute_manga_pipeline(client, status_msg, user_id)
 
 async def send_partial_results(client, status_msg, user_id):

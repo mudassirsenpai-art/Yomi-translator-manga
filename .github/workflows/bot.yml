@@ -51,7 +51,13 @@ jobs:
       - name: Clone & Setup MangaTranslator Core
         run: |
           rm -rf MangaTranslator
-          git clone https://github.com/meangrinch/MangaTranslator.git
+          # Pinned to a tagged release instead of tracking main. v1.21.1 (2026-07-14)
+          # swapped in a new RT-DETR-v2 conjoined-bubble detector model, which this
+          # workflow hit mid-run as a fresh, untested weight download ("Loading
+          # weights: 0/770" crash). Pinning avoids being silently broken by
+          # same-day upstream changes; bump this tag deliberately when ready to
+          # pick up new releases.
+          git clone --branch v1.21.0 --depth 1 https://github.com/meangrinch/MangaTranslator.git
           cd MangaTranslator
           # PyTorch must be installed explicitly - it is NOT in requirements.txt
           # because it's hardware-specific (CPU/CUDA/ROCm/MPS).

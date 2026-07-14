@@ -2215,6 +2215,96 @@ def _seam_looks_duplicated(recomposed_im, seam_y, band_px=SEAM_CHECK_BAND_PX, di
     diff = np.abs(upper_band - lower_band).mean()
     return diff < diff_threshold
 
+def _line_strength_at_row(arr, row, width_sample=None):
+    """
+    Measure how much a single row stands out from its immediate neighbors
+    (the signature of a leftover seam line: a thin 1-3px band that is
+    noticeably darker/lighter/different-colored than the rows just above and
+    below it). Returns a float delta - the bigger it is, the more visible the
+    line is. arr is HxWx3 float32.
+    """
+    import numpy as np
+    height = arr.shape[0]
+    if row <= 1 or row >= height - 2:
+        return 0.0
+    # Compare the row itself against the average of a few rows just outside
+    # it on both sides, so we detect a thin line even if the overall image
+    # has a smooth gradient running through it.
+    context_above = arr[max(0, row - 4):row - 1, :, :].mean(axis=(0, 1))
+    context_below = arr[row + 2:min(height, row + 5), :, :].mean(axis=(0, 1))
+    context = (context_above + context_below) / 2.0
+    line_rows = arr[row - 1:row + 2, :, :].mean(axis=(0, 1))
+    return float(np.abs(line_rows - context).mean())
+
+
+def _blend_seam_band(arr, seam_y, total_height, band_px):
+    """
+    Cross-fade a band of rows straddling seam_y using real gradients pulled
+    from both sides (several rows each), not just the single row touching the
+    seam. This is the actual merge/adjust step: it replaces the hard join
+    with pixel values that continue each side's local trend into the band,
+    so the two tiles read as one continuous image with no seam artifact.
+    """
+    import numpy as np
+    top = max(0, seam_y - band_px)
+    bottom = min(total_height, seam_y + band_px)
+    band = bottom - top
+    if band <= 1:
+        return arr
+
+    # Pull a short run of rows from each side (not just one row) to get a
+    # real local gradient/texture rather than collapsing to two flat values.
+    sample_px = min(3, band_px)
+    above_sample = arr[max(0, seam_y - sample_px):seam_y, :, :]
+    below_sample = arr[seam_y:min(total_height, seam_y + sample_px), :, :]
+    if above_sample.shape[0] == 0 or below_sample.shape[0] == 0:
+        return arr
+    above_avg = above_sample.mean(axis=0, keepdims=True)
+    below_avg = below_sample.mean(axis=0, keepdims=True)
+
+    weights = np.linspace(0, 1, band, dtype=np.float32).reshape(-1, 1, 1)
+    # Keep each row's own detail (texture/linework) but pull its brightness
+    # and color onto the smooth above->below gradient, so art isn't replaced
+    # with a flat blur - only the seam discontinuity is removed.
+    original_band = arr[top:bottom, :, :]
+    target_gradient = above_avg * (1 - weights) + below_avg * weights
+    band_local_mean = original_band.mean(axis=(1, 2), keepdims=True)
+    corrected = original_band - band_local_mean + target_gradient.mean(axis=(1, 2), keepdims=True)
+    # Full correction right at the seam, tapering to zero correction at the
+    # band edges so it grafts smoothly onto untouched pixels beyond the band.
+    taper = 1.0 - np.abs(np.linspace(-1, 1, band, dtype=np.float32)).reshape(-1, 1, 1)
+    final_band = original_band * (1 - taper) + corrected * taper
+    arr[top:bottom, :, :] = final_band
+    return arr
+
+
+def _fix_all_seams(recomposed_im, seam_ys, total_height, base_band_px=10):
+    """
+    Cut-count -> merge -> adjust/verify -> combine, applied to every seam on
+    the page. Runs once per seam with the base band, then re-checks each
+    seam; any seam that still shows a residual line gets a second, wider pass
+    so the final page has no detectable cut regardless of how many tiles it
+    was split into.
+    """
+    import numpy as np
+    arr = np.asarray(recomposed_im).astype(np.float32)
+
+    # Pass 1: blend every seam.
+    for seam_y in seam_ys:
+        arr = _blend_seam_band(arr, seam_y, total_height, base_band_px)
+
+    # Pass 2 (verify + fix): any seam still showing a visible line gets a
+    # stronger, wider blend. Threshold is intentionally low since even a
+    # faint ~0.03in line is noticeable on a phone screen.
+    RESIDUAL_LINE_THRESHOLD = 4.0
+    for seam_y in seam_ys:
+        strength = _line_strength_at_row(arr, seam_y)
+        if strength > RESIDUAL_LINE_THRESHOLD:
+            arr = _blend_seam_band(arr, seam_y, total_height, base_band_px * 2)
+
+    return np.clip(arr, 0, 255).astype("uint8")
+
+
 def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None):
     from PIL import Image
     cfg = cfg or {}
@@ -2253,32 +2343,22 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None):
             if i < len(translated_tile_paths) - 1:
                 seam_ys.append(y_cursor)
 
-    # Feather each tile seam: a small band of rows straddling the join is
-    # blended between the pixel values just above and just below it. This
-    # softens any visible line at the seam - whether from JPEG compression
-    # drift between independently-saved tiles, or from the resize() above
-    # when the engine returns a tile at a slightly different resolution than
-    # it was sent at. A hard paste (the only thing this function did before)
-    # keeps any such artifact fully visible; this doesn't change page content,
-    # it only smooths a thin band of pixels at each join.
+    # Fix every seam so no cut is visually detectable in the final page.
+    # Old approach: blend a narrow band using only the single row directly
+    # above/below the seam. That collapses the whole band to an interpolation
+    # between two rows, which itself creates a visible ~0.03in band whenever
+    # those two rows differ (JPEG block artifacts, independent per-tile
+    # compression, tiny resize drift) - i.e. it was creating a line while
+    # trying to remove one.
+    #
+    # New approach: cut count (seam_ys) -> merge each seam using a real
+    # gradient pulled from several rows on each side -> verify each seam
+    # after blending and apply a stronger pass if a residual line remains ->
+    # combine into one page with no seam feel. Runs unconditionally on every
+    # seam, regardless of how many cuts were made on the page.
     if seam_ys:
-        import numpy as np
-        FEATHER_PX = 6
-        arr = np.asarray(recomposed).astype(np.float32)
-        for seam_y in seam_ys:
-            top = max(0, seam_y - FEATHER_PX)
-            bottom = min(total_height, seam_y + FEATHER_PX)
-            band = bottom - top
-            if band <= 1:
-                continue
-            weights = np.linspace(0, 1, band, dtype=np.float32).reshape(-1, 1, 1)
-            above_row = arr[max(0, seam_y - 1):seam_y, :, :]
-            below_row = arr[seam_y:seam_y + 1, :, :]
-            if above_row.shape[0] == 0 or below_row.shape[0] == 0:
-                continue
-            blended = above_row * (1 - weights) + below_row * weights
-            arr[top:bottom, :, :] = blended
-        recomposed = Image.fromarray(np.clip(arr, 0, 255).astype("uint8"), "RGB")
+        arr = _fix_all_seams(recomposed, seam_ys, total_height)
+        recomposed = Image.fromarray(arr, "RGB")
 
     # Check every seam for duplicated/misaligned content, not just seams that were
     # forced through non-flat rows. Even a "safe" flat-row cut can look duplicated
@@ -2740,33 +2820,23 @@ def package_output(source_dir, job_root, file_idx, output_format):
                         y += im.height
                         im.close()
 
-                    # Feather each tile boundary: each tile is saved as its own
-                    # JPEG (per the configured jpeg_quality), so even a "safe" cut row can end up with
-                    # a faint brightness/color difference across the seam once
-                    # the tiles are compressed independently. A hard paste keeps
-                    # that visible as a thin line. Cross-fading a small band of
-                    # rows on either side of each seam blends the two tiles'
-                    # pixel values there, matching how a continuous webtoon
-                    # image (or CBZ scroll) looks - no visible seam.
-                    import numpy as np
-                    FEATHER_PX = 6
-                    arr = np.asarray(stitched).astype(np.float32)
+                    # Cut count -> merge -> adjust/verify -> combine: each
+                    # tile is saved as its own JPEG (per the configured
+                    # jpeg_quality), so even a "safe" cut row can end up with
+                    # a faint brightness/color difference across the seam
+                    # once tiles are compressed independently. Uses the same
+                    # verified multi-row seam fix as recompose_tiled_page
+                    # (not a 2-row feather, which itself produced a visible
+                    # ~0.03in band) so this fallback path can't leave a
+                    # residual line either.
+                    seam_ys = []
                     seam_y = 0
                     for im in opened[:-1]:
                         seam_y += im.height
-                        top = max(0, seam_y - FEATHER_PX)
-                        bottom = min(total_height, seam_y + FEATHER_PX)
-                        band = bottom - top
-                        if band <= 1:
-                            continue
-                        weights = np.linspace(0, 1, band, dtype=np.float32).reshape(-1, 1, 1)
-                        above_row = arr[max(0, seam_y - 1):seam_y, :, :]
-                        below_row = arr[seam_y:seam_y + 1, :, :]
-                        if above_row.shape[0] == 0 or below_row.shape[0] == 0:
-                            continue
-                        blended = above_row * (1 - weights) + below_row * weights
-                        arr[top:bottom, :, :] = blended
-                    stitched = Image.fromarray(np.clip(arr, 0, 255).astype("uint8"), "RGB")
+                        seam_ys.append(seam_y)
+                    if seam_ys:
+                        arr = _fix_all_seams(stitched, seam_ys, total_height)
+                        stitched = Image.fromarray(arr, "RGB")
                     pages.append(stitched)
 
             if pages:

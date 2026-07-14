@@ -1954,7 +1954,7 @@ def extract_archive(path, dest_dir):
     with zipfile.ZipFile(path, 'r') as zip_ref:
         zip_ref.extractall(dest_dir)
 
-def extract_pdf(path, dest_dir):
+def extract_pdf(path, dest_dir, jpeg_quality=90):
     import fitz  
     zoom = 200 / 72  
     mat = fitz.Matrix(zoom, zoom)
@@ -1963,7 +1963,19 @@ def extract_pdf(path, dest_dir):
         for i, page in enumerate(doc, start=1):
             pix = page.get_pixmap(matrix=mat, alpha=False)
             out_path = os.path.join(dest_dir, f"page_{i:03d}.jpg")
-            pix.save(out_path)
+            # PyMuPDF's pix.save() with no explicit quality uses a very high
+            # internal default for JPEG, which was the single biggest
+            # contributor to output files ballooning far past the original
+            # PDF's size (e.g. a 5-10MB source becoming 180MB+). Re-encode
+            # through PIL so the configured jpeg_quality is actually honored
+            # at the very first step of the pipeline, before tiling/upscaling
+            # multiply that cost further.
+            from PIL import Image as _Img
+            img_bytes = pix.tobytes("ppm")
+            import io as _io
+            _Img.open(_io.BytesIO(img_bytes)).convert("RGB").save(
+                out_path, "JPEG", quality=jpeg_quality
+            )
     finally:
         doc.close()
 
@@ -1972,7 +1984,7 @@ IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.webp')
 def _natural_key(name):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', name)]
 
-def _stitch_group_vertically(input_dir, base_name, slice_files):
+def _stitch_group_vertically(input_dir, base_name, slice_files, cfg=None):
     from PIL import Image
     slice_files = sorted(slice_files, key=_natural_key)
     imgs = [Image.open(os.path.join(input_dir, f)).convert("RGB") for f in slice_files]
@@ -1986,7 +1998,7 @@ def _stitch_group_vertically(input_dir, base_name, slice_files):
         y_offset += im.height
     out_name = f"{base_name}__stitched.jpg"
     out_path = os.path.join(input_dir, out_name)
-    stitched.save(out_path, quality=95)
+    stitched.save(out_path, quality=(cfg.get("jpeg_quality") if cfg else None) or 90)
     for im in imgs:
         im.close()
     for f in slice_files:
@@ -2010,7 +2022,7 @@ def stitch_sliced_images(input_dir):
 
     for base, slice_files in groups.items():
         if len(slice_files) > 1:
-            _stitch_group_vertically(input_dir, base, slice_files)
+            _stitch_group_vertically(input_dir, base, slice_files, cfg=cfg)
 
 def flatten_and_order(input_dir, content_type="manhwa", cfg=None):
     for root, _, files in os.walk(input_dir, topdown=False):
@@ -2156,7 +2168,7 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
 
                 tile = im.crop((0, y, width, cut))
                 tile_name = f"{os.path.splitext(fname)[0]}_tile{tile_n:03d}.jpg"
-                tile.save(os.path.join(input_dir, tile_name), quality=95)
+                tile.save(os.path.join(input_dir, tile_name), quality=(cfg.get("jpeg_quality") if cfg else None) or 90)
                 tile_files.append(tile_name)
                 tile_heights.append(cut - y)
                 tile_n += 1
@@ -2254,7 +2266,7 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None):
 
     out_name = manifest_entry["original_name"]
     out_path = os.path.join(translated_dir, out_name)
-    recomposed.save(out_path, quality=95)
+    recomposed.save(out_path, quality=cfg.get("jpeg_quality") or 90)
     for p in translated_tile_paths:
         try:
             os.remove(p)
@@ -2416,7 +2428,7 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
         if mode == "archive" or downloaded_path.lower().endswith(('.zip', '.cbz')):
             extract_archive(downloaded_path, input_dir)
         elif mode == "pdf" or downloaded_path.lower().endswith('.pdf'):
-            extract_pdf(downloaded_path, input_dir)
+            extract_pdf(downloaded_path, input_dir, jpeg_quality=cfg.get("jpeg_quality") or 90)
         else:
             shutil.move(downloaded_path, os.path.join(input_dir, os.path.basename(downloaded_path)))
 
@@ -2702,7 +2714,7 @@ def package_output(source_dir, job_root, file_idx, output_format):
                         im.close()
 
                     # Feather each tile boundary: each tile is saved as its own
-                    # JPEG (quality=95), so even a "safe" cut row can end up with
+                    # JPEG (per the configured jpeg_quality), so even a "safe" cut row can end up with
                     # a faint brightness/color difference across the seam once
                     # the tiles are compressed independently. A hard paste keeps
                     # that visible as a thin line. Cross-fading a small band of

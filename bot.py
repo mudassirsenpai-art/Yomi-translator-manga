@@ -2654,13 +2654,84 @@ def package_output(source_dir, job_root, file_idx, output_format):
             payload = cbz_payload
         return payload
     elif output_format == "pdf":
+        from PIL import Image
+        import re as _re
+
         images = sorted(Path(source_dir).glob("*.*"))
+        image_paths = [p for p in images if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")]
         pdf_path = f"{archive_base}.pdf"
+
+        # Tiled manhwa pages are saved as separate files (e.g. "007_tile000.jpg",
+        # "007_tile001.jpg", ...). If each tile were placed on its own PDF page,
+        # every tile cut would become a hard page break, visually chopping up
+        # panels/art that were meant to read as one continuous strip (unlike CBZ,
+        # which scrolls tiles together seamlessly). To match that seamless
+        # experience in PDF, group tiles by their original page stem and
+        # vertically re-stitch them into a single image per page before writing
+        # PDF pages.
+        _TILE_RE = _re.compile(r"^(?P<stem>.+)_tile\d+$")
+
+        def _page_key(p):
+            m = _TILE_RE.match(p.stem)
+            return m.group("stem") if m else p.stem
+
+        groups = {}
+        order = []
+        for p in image_paths:
+            key = _page_key(p)
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append(p)
+
         try:
-            from PIL import Image
-            imgs = [Image.open(p).convert("RGB") for p in images if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")]
-            if imgs:
-                imgs[0].save(pdf_path, save_all=True, append_images=imgs[1:])
+            pages = []
+            for key in order:
+                parts = sorted(groups[key])
+                if len(parts) == 1:
+                    pages.append(Image.open(parts[0]).convert("RGB"))
+                else:
+                    opened = [Image.open(p).convert("RGB") for p in parts]
+                    width = max(im.width for im in opened)
+                    total_height = sum(im.height for im in opened)
+                    stitched = Image.new("RGB", (width, total_height), "white")
+                    y = 0
+                    for im in opened:
+                        stitched.paste(im, (0, y))
+                        y += im.height
+                        im.close()
+
+                    # Feather each tile boundary: each tile is saved as its own
+                    # JPEG (quality=95), so even a "safe" cut row can end up with
+                    # a faint brightness/color difference across the seam once
+                    # the tiles are compressed independently. A hard paste keeps
+                    # that visible as a thin line. Cross-fading a small band of
+                    # rows on either side of each seam blends the two tiles'
+                    # pixel values there, matching how a continuous webtoon
+                    # image (or CBZ scroll) looks - no visible seam.
+                    import numpy as np
+                    FEATHER_PX = 6
+                    arr = np.asarray(stitched).astype(np.float32)
+                    seam_y = 0
+                    for im in opened[:-1]:
+                        seam_y += im.height
+                        top = max(0, seam_y - FEATHER_PX)
+                        bottom = min(total_height, seam_y + FEATHER_PX)
+                        band = bottom - top
+                        if band <= 1:
+                            continue
+                        weights = np.linspace(0, 1, band, dtype=np.float32).reshape(-1, 1, 1)
+                        above_row = arr[max(0, seam_y - 1):seam_y, :, :]
+                        below_row = arr[seam_y:seam_y + 1, :, :]
+                        if above_row.shape[0] == 0 or below_row.shape[0] == 0:
+                            continue
+                        blended = above_row * (1 - weights) + below_row * weights
+                        arr[top:bottom, :, :] = blended
+                    stitched = Image.fromarray(np.clip(arr, 0, 255).astype("uint8"), "RGB")
+                    pages.append(stitched)
+
+            if pages:
+                pages[0].save(pdf_path, save_all=True, append_images=pages[1:])
                 return pdf_path
         except Exception:
             pass

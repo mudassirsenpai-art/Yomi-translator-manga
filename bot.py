@@ -11,6 +11,16 @@ from pathlib import Path
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
 
+# PIL's default decompression-bomb guard (~89.5M pixels) is tuned for arbitrary
+# untrusted images and is too low for legitimate manhwa long-strip pages, which
+# routinely exceed it (e.g. a 800px-wide strip taller than ~115,000px). Raising
+# the cap avoids both the DecompressionBombWarning and the hard
+# DecompressionBombError PIL raises above 2x the limit. We still keep a cap
+# (rather than None) so a genuinely malicious/corrupt image can't force
+# unbounded memory allocation.
+from PIL import Image as _PILImage
+_PILImage.MAX_IMAGE_PIXELS = 500_000_000  # ~500MP
+
 # ================= Configuration & Secrets =================
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
@@ -2130,6 +2140,19 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
 
                 if was_forced:
                     forced_cut_rows.append(cut)
+
+                # Guard against a zero/near-zero-height crop. This can happen when
+                # the safe-cut search (or its widening fallback) lands `cut` right
+                # on top of `y`, or when a prior iteration already consumed almost
+                # the entire remaining height. Saving a degenerate (0-2px tall) JPEG
+                # here produces a file that downstream OpenCV code can fail to
+                # decode, surfacing as a "!_src.empty()" cvtColor assertion later
+                # in the pipeline. If the slice is too thin to be a real tile,
+                # just extend it to the bottom of the page instead of emitting it.
+                MIN_TILE_HEIGHT_PX = 8
+                if cut - y < MIN_TILE_HEIGHT_PX:
+                    cut = height
+                    was_forced = False
 
                 tile = im.crop((0, y, width, cut))
                 tile_name = f"{os.path.splitext(fname)[0]}_tile{tile_n:03d}.jpg"

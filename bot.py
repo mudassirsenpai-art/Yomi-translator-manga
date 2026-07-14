@@ -2253,6 +2253,33 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None):
             if i < len(translated_tile_paths) - 1:
                 seam_ys.append(y_cursor)
 
+    # Feather each tile seam: a small band of rows straddling the join is
+    # blended between the pixel values just above and just below it. This
+    # softens any visible line at the seam - whether from JPEG compression
+    # drift between independently-saved tiles, or from the resize() above
+    # when the engine returns a tile at a slightly different resolution than
+    # it was sent at. A hard paste (the only thing this function did before)
+    # keeps any such artifact fully visible; this doesn't change page content,
+    # it only smooths a thin band of pixels at each join.
+    if seam_ys:
+        import numpy as np
+        FEATHER_PX = 6
+        arr = np.asarray(recomposed).astype(np.float32)
+        for seam_y in seam_ys:
+            top = max(0, seam_y - FEATHER_PX)
+            bottom = min(total_height, seam_y + FEATHER_PX)
+            band = bottom - top
+            if band <= 1:
+                continue
+            weights = np.linspace(0, 1, band, dtype=np.float32).reshape(-1, 1, 1)
+            above_row = arr[max(0, seam_y - 1):seam_y, :, :]
+            below_row = arr[seam_y:seam_y + 1, :, :]
+            if above_row.shape[0] == 0 or below_row.shape[0] == 0:
+                continue
+            blended = above_row * (1 - weights) + below_row * weights
+            arr[top:bottom, :, :] = blended
+        recomposed = Image.fromarray(np.clip(arr, 0, 255).astype("uint8"), "RGB")
+
     # Check every seam for duplicated/misaligned content, not just seams that were
     # forced through non-flat rows. Even a "safe" flat-row cut can look duplicated
     # after inpainting/redrawing shifts art slightly, so this can't be skipped —
@@ -2743,10 +2770,39 @@ def package_output(source_dir, job_root, file_idx, output_format):
                     pages.append(stitched)
 
             if pages:
+                # Normalize every page to the same width before writing the PDF.
+                # Source PDFs (especially scraped manhwa/webtoon PDFs) can have
+                # slightly different page widths from page to page. Each page's
+                # width was faithfully preserved through extraction/tiling, so
+                # the final PDF itself is structurally correct - but many mobile
+                # PDF readers render continuous-scroll view by padding narrower
+                # pages out to a common width, and default that padding to
+                # black rather than white. Centering each page on a common-width
+                # white canvas here removes any width variance for the reader
+                # to pad around, so no black bars/borders can appear.
+                target_width = max(im.width for im in pages)
+                normalized_pages = []
+                for im in pages:
+                    if im.width == target_width:
+                        normalized_pages.append(im)
+                    else:
+                        canvas = Image.new("RGB", (target_width, im.height), "white")
+                        x_offset = (target_width - im.width) // 2
+                        canvas.paste(im, (x_offset, 0))
+                        normalized_pages.append(canvas)
+                pages = normalized_pages
+
                 pages[0].save(pdf_path, save_all=True, append_images=pages[1:])
                 return pdf_path
-        except Exception:
-            pass
+        except Exception as e:
+            # Log the real reason instead of silently falling back - a swallowed
+            # exception here previously meant a single bad page could silently
+            # degrade the whole chapter's PDF into a plain zip of unstitched
+            # tiles with no visible error, which looked like "random black gaps"
+            # rather than the actual underlying failure.
+            import traceback
+            print(f"⚠️ PDF stitching failed, falling back to zip: {type(e).__name__}: {e}")
+            traceback.print_exc()
         shutil.make_archive(archive_base, "zip", source_dir)
         return f"{archive_base}.zip"
     else:

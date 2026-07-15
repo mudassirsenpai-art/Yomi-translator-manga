@@ -2539,13 +2539,39 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             print(stderr_text)
 
             if process.returncode != 0:
-                tail = (stderr_text.strip() or stdout_text.strip() or "no output captured")[-800:]
+                partial_produced = []
+                if os.path.exists(file_translated_dir):
+                    partial_produced = [f for f in os.listdir(file_translated_dir) if f.lower().endswith(IMAGE_EXTS)]
+
+                if not partial_produced:
+                    # Nothing came out at all - this is a genuine hard failure.
+                    tail = (stderr_text.strip() or stdout_text.strip() or "no output captured")[-800:]
+                    await safe_edit(
+                        status_msg,
+                        f"❌ **Engine exited with error on file {file_idx}/{total_files}** (code {process.returncode}):\n```\n{tail}\n```"
+                    )
+                    active_jobs.pop(user_id, None)
+                    return
+
+                # Partial success: some tiles/pages translated fine, but the engine
+                # exited non-zero because one or more individual images/tiles
+                # couldn't be translated (e.g. a bubble batch the LLM refused or
+                # garbled). Don't throw away the successful pages - warn and continue.
+                failed_note = ""
+                m = re.search(r"Failed:\s*(\d+)\s*images?", stdout_text)
+                if m:
+                    failed_note = f" ({m.group(1)} image(s) failed)"
+                fail_lines = re.findall(r"^\s*-\s*(\S+):\s*(.+)$", stdout_text, re.MULTILINE)
+                fail_detail = ""
+                if fail_lines:
+                    shown = fail_lines[:5]
+                    fail_detail = "\n" + "\n".join(f"• `{name}` — {reason}" for name, reason in shown)
                 await safe_edit(
                     status_msg,
-                    f"❌ **Engine exited with error on file {file_idx}/{total_files}** (code {process.returncode}):\n```\n{tail}\n```"
+                    f"⚠️ File {file_idx}/{total_files}: engine reported errors{failed_note}, "
+                    f"but {len(partial_produced)} image(s) translated successfully. "
+                    f"Continuing with the rest; failed page(s) may be missing or untranslated.{fail_detail}"
                 )
-                active_jobs.pop(user_id, None)
-                return
         except Exception as exec_err:
             await safe_edit(status_msg, f"❌ Engine error on file {file_idx}/{total_files}: {exec_err}")
             active_jobs.pop(user_id, None)

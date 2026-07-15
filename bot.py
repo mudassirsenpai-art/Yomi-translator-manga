@@ -11,16 +11,6 @@ from pathlib import Path
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
 
-# PIL's default decompression-bomb guard (~89.5M pixels) is tuned for arbitrary
-# untrusted images and is too low for legitimate manhwa long-strip pages, which
-# routinely exceed it (e.g. a 800px-wide strip taller than ~115,000px). Raising
-# the cap avoids both the DecompressionBombWarning and the hard
-# DecompressionBombError PIL raises above 2x the limit. We still keep a cap
-# (rather than None) so a genuinely malicious/corrupt image can't force
-# unbounded memory allocation.
-from PIL import Image as _PILImage
-_PILImage.MAX_IMAGE_PIXELS = 500_000_000  # ~500MP
-
 # ================= Configuration & Secrets =================
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
@@ -79,14 +69,6 @@ MANHWA_TILE_HEIGHT = 3200
 MANHWA_TILE_OVERLAP = 400
 MANHWA_TILE_TRIGGER_HEIGHT = 3800
 MANHWA_SAFE_CUT_FLAT_THRESHOLD = 3.5
-# Min/Max cuts bound how many pieces a single tall page can be sliced into.
-# min=0 means "no forced cutting" (page can pass through as one tile if it
-# doesn't need splitting). max caps the total number of cuts made per page —
-# once the cap is hit, whatever height remains is kept as one final (possibly
-# larger than tile_height) tile rather than forcing another cut through a
-# bubble/panel.
-MANHWA_TILE_MIN_CUTS = 0
-MANHWA_TILE_MAX_CUTS = 6
 
 DEFAULT_SYSTEM_PROMPT_NAME = "Default Localization Engine"
 DEFAULT_SYSTEM_PROMPT_TEXT = (
@@ -145,7 +127,7 @@ def default_config():
         # Tiling Settings
         "tile_enabled": None, "tile_height": None, "tile_search_radius": None, 
         "tile_trigger_height": None, "tile_flat_threshold": None, "tile_seam_band_px": None, 
-        "tile_seam_diff_threshold": None, "tile_min_cuts": None, "tile_max_cuts": None,
+        "tile_seam_diff_threshold": None,
 
         # UI Modifiable Flags (Appearance, Detect)
         "min_font_size": None, "max_font_size": None, "auto_vertical_text": None,
@@ -165,6 +147,7 @@ def default_config():
         "media_resolution_bubbles": None, "media_resolution_context": None, "image_detail": None,
         "send_full_page_context": None, "parallel_requests": None, "batch_parallel_within_pages": None,
         "batch_previous_context_images": None, "batch_previous_context_texts": None,
+        "retry_failed_once": None, "overlap_llm_with_inpaint": None,
         "use_otsu_threshold": None, "thresholding_value": None, "roi_shrink_px": None, 
         "inpaint_colored_bubbles": None, "whiteout_conjoined_bubbles": None,
         "upscale_method": None, "image_upscale_mode": None, "image_upscale_factor": None,
@@ -496,189 +479,6 @@ def sanitize_cfg_values(cfg):
             cfg[field] = None
     return cleared
 
-# ================= Universal Config Sanitization & Type-Coercion Layer =================
-# This is the single choke point every cfg dict must pass through before it's used
-# anywhere sensitive (subprocess invocation, tiling math, rendering flags). It exists
-# because cfg values can arrive from three sources with three different trust levels:
-# the bot's own inline-keyboard menus (already validated at entry), a hand-edited or
-# re-imported JSON file (untrusted types), and legacy on-disk user_settings.json rows
-# saved by an older bot version (unknown shape). No matter which one it is, nothing
-# here should ever be able to reach argparse, PIL, or numpy as a raw/garbage value.
-#
-# Schema shape per field: (kind, default, min, max)
-#   kind: "int" | "float" | "bool" | "str" | "choice"
-#   default: safe fallback used when a value is missing/empty/unfixable (None means
-#            "leave unset so the engine applies its own built-in default")
-#   min/max: inclusive numeric bounds, or None if unbounded on that side
-# "choice" fields resolve their legal value set from VALID_CHOICES / the *_OPTIONS
-# lists defined above, via _resolve_choice_set().
-CONFIG_SCHEMA = {
-    # --- Batching & Parallelism ---
-    "parallel_requests":             ("int",   1,    1,    20),
-    "batch_parallel_within_pages":   ("bool",  None, None, None),
-    "batch_previous_context_images": ("int",   0,    0,    10),
-    "batch_previous_context_texts":  ("int",   3,    0,    50),
-
-    # --- Tiling & Image Splitting (Manhwa long-strip) ---
-    "tile_enabled":             ("bool",  True, None, None),
-    "tile_height":              ("int",   MANHWA_TILE_HEIGHT,             64, 20000),
-    "tile_search_radius":       ("int",   MANHWA_TILE_OVERLAP,             1,  5000),
-    "tile_trigger_height":      ("int",   MANHWA_TILE_TRIGGER_HEIGHT,     64, 50000),
-    "tile_flat_threshold":      ("float", MANHWA_SAFE_CUT_FLAT_THRESHOLD, 0.0, 255.0),
-    "tile_seam_band_px":        ("int",   40,   1,    2000),
-    "tile_seam_diff_threshold": ("float", 6.0,  0.0,  255.0),
-    "tile_min_cuts":            ("int",   MANHWA_TILE_MIN_CUTS, 0, 100),
-    "tile_max_cuts":            ("int",   MANHWA_TILE_MAX_CUTS, 1, 100),
-
-    # --- Detection & OCR ---
-    "seg_model":             ("choice", None, None, None),
-    "bubble_detector_model": ("choice", None, None, None),
-    "ocr_method":            ("choice", None, None, None),
-    "confidence":            ("float", 0.6,  0.0, 1.0),
-    "conjoined_confidence":  ("float", 0.35, 0.0, 1.0),
-    "panel_confidence":      ("float", 0.25, 0.0, 1.0),
-    "osb_confidence":        ("float", 0.6,  0.0, 1.0),
-
-    # --- Font & Styling ---
-    "font_name":          ("str",   None, None, None),
-    "min_font_size":      ("int",   None, 1,   500),
-    "max_font_size":      ("int",   None, 1,   500),
-    "line_spacing_mult":  ("float", None, 0.1, 10.0),
-    "subpixel_rendering": ("bool",  None, None, None),
-    "font_hinting":       ("choice",None, None, None),
-    "use_ligatures":      ("bool",  None, None, None),
-    "osb_outline_width":  ("float", 3.0,  0.0, 50.0),
-    "osb_line_spacing":   ("float", 1.0,  0.1, 10.0),
-
-    # --- Inpainting & Upscaling ---
-    "osb_inpainting_method": ("choice", None, None, None),
-    "upscale_method":        ("choice", None, None, None),
-    "image_upscale_mode":    ("choice", None, None, None),
-    "image_upscale_factor":  ("float", 2.0, 1.0, 8.0),
-}
-
-_CHOICE_SOURCES = {
-    "seg_model": SEG_MODEL_OPTIONS,
-    "bubble_detector_model": BUBBLE_DETECTOR_OPTIONS,
-    "ocr_method": OCR_METHOD_OPTIONS,
-    "font_hinting": FONT_HINTING_OPTIONS,
-}
-
-def _resolve_choice_set(field):
-    if field in VALID_CHOICES:
-        return VALID_CHOICES[field]
-    src = _CHOICE_SOURCES.get(field)
-    return set(src) if src else None
-
-def _coerce_one(field, val, kind, default, lo, hi):
-    """Returns (coerced_value, was_changed). Never raises."""
-    if val is None:
-        return None, False
-    if isinstance(val, str) and val.strip() == "":
-        return None, True  # empty string counts as "unset"
-
-    try:
-        if kind == "int":
-            if isinstance(val, bool):
-                raise ValueError
-            coerced = int(val) if isinstance(val, float) else int(str(val).strip())
-        elif kind == "float":
-            if isinstance(val, bool):
-                raise ValueError
-            coerced = float(val) if isinstance(val, (int, float)) else float(str(val).strip())
-        elif kind == "bool":
-            if isinstance(val, bool):
-                coerced = val
-            elif isinstance(val, (int, float)):
-                coerced = bool(val)
-            elif isinstance(val, str):
-                low = val.strip().lower()
-                if low in ("true", "1", "yes", "on"):
-                    coerced = True
-                elif low in ("false", "0", "no", "off"):
-                    coerced = False
-                else:
-                    raise ValueError
-            else:
-                raise ValueError
-        elif kind == "str":
-            coerced = str(val)
-        elif kind == "choice":
-            allowed = _resolve_choice_set(field)
-            coerced = str(val)
-            if allowed is not None and coerced not in allowed:
-                return default, True
-            return coerced, False
-        else:
-            return default, True
-    except (ValueError, TypeError):
-        return default, True
-
-    changed = coerced != val
-    if kind in ("int", "float"):
-        if lo is not None and coerced < lo:
-            return lo, True
-        if hi is not None and coerced > hi:
-            return hi, True
-    return coerced, changed
-
-def sanitize_and_coerce_config(cfg):
-    """The bulletproof fallback layer: walks CONFIG_SCHEMA (plus the remaining
-    VALID_CHOICES fields it doesn't cover) over the given cfg dict, force-casting
-    strings to the correct int/float/bool type and clamping to safe ranges. Any
-    field that's missing, empty, or holds a value that can't be made sane is
-    replaced with its schema default (which may be None, meaning "let the engine
-    fall back to its own built-in default").
-
-    This never raises and never leaves a field in a state that could crash
-    downstream code (tiling math, subprocess argv construction, PIL/numpy calls).
-    Call it on every cfg dict right before it's used for anything consequential —
-    whether that dict came from the bot's own menus, an imported settings JSON, or
-    an old on-disk row from a previous bot version.
-
-    Returns a list of (field, original_value, new_value) corrections made, so the
-    caller can optionally surface a friendly "here's what got auto-fixed" notice.
-    """
-    if not isinstance(cfg, dict):
-        return []
-
-    corrections = []
-    for field, (kind, default, lo, hi) in CONFIG_SCHEMA.items():
-        original = cfg.get(field, None)
-        coerced, changed = _coerce_one(field, original, kind, default, lo, hi)
-        if changed:
-            corrections.append((field, original, coerced))
-        cfg[field] = coerced
-
-    # Cross-field sanity fixes a per-field pass can't catch alone — mirrors the
-    # interactive UI's own guardrails so an imported/legacy config can't smuggle
-    # in an inverted or self-contradictory pair that would confuse the tiler or
-    # the font-size clamp downstream.
-    def _fix_pair(lo_key, hi_key):
-        lo_v, hi_v = cfg.get(lo_key), cfg.get(hi_key)
-        if lo_v is not None and hi_v is not None and lo_v > hi_v:
-            corrections.append((f"{lo_key}/{hi_key}", (lo_v, hi_v), None))
-            cfg[lo_key] = None
-            cfg[hi_key] = None
-
-    _fix_pair("min_font_size", "max_font_size")
-    _fix_pair("tile_height", "tile_trigger_height")
-    _fix_pair("tile_min_cuts", "tile_max_cuts")
-
-    # Sweep every remaining VALID_CHOICES field not already in CONFIG_SCHEMA
-    # (e.g. osb_flux_backend, translation_mode, reading_direction, ...) so the
-    # ENTIRE settings surface is covered, not just the categories called out above.
-    for field, allowed in VALID_CHOICES.items():
-        if field in CONFIG_SCHEMA:
-            continue
-        val = cfg.get(field)
-        if val is not None and val not in allowed:
-            corrections.append((field, val, None))
-            cfg[field] = None
-
-    return corrections
-
-
 # ================= Extended Settings Registry (auto-derived from main.py argparse) =================
 # Every field here mirrors an actual --flag in MangaTranslator/main.py exactly (type, default,
 # choices), so values entered through these menus can never desync from what the engine accepts.
@@ -716,6 +516,8 @@ FIELD_REGISTRY = {
     'batch_parallel_within_pages': {'group': 'batch', 'label': '⚙️ Parallel Within Pages', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
     'batch_previous_context_images': {'group': 'batch', 'label': '🖼 Previous Context Images', 'vtype': 'val', 'argtype': 'int', 'default': 0, 'choices': None, 'hint': '0-10'},
     'batch_previous_context_texts': {'group': 'batch', 'label': '📝 Previous Context Texts', 'vtype': 'val', 'argtype': 'int', 'default': 3, 'choices': None, 'hint': '0-50'},
+    'retry_failed_once': {'group': 'batch', 'label': '🔁 Retry Failed Once', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'overlap_llm_with_inpaint': {'group': 'batch', 'label': '⏱ Overlap LLM With Inpaint', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
     'verbose': {'group': 'batch', 'label': '🔊 Verbose Logging', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
     'cpu': {'group': 'batch', 'label': '🖥 Force CPU', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
     'cleaning_only': {'group': 'batch', 'label': '🧹 Cleaning Only', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
@@ -757,7 +559,7 @@ FIELD_REGISTRY = {
 FIELD_GROUPS = {
     'generation': ['temperature', 'top_p', 'top_k', 'max_tokens', 'use_custom_sampling', 'reasoning_effort', 'effort', 'verbosity', 'reading_direction', 'enable_web_search', 'enable_code_execution', 'media_resolution', 'media_resolution_bubbles', 'media_resolution_context', 'image_detail', 'send_full_page_context'],
     'cleaning': ['inpaint_colored_bubbles', 'use_otsu_threshold', 'thresholding_value', 'roi_shrink_px', 'whiteout_conjoined_bubbles', 'upscale_method', 'image_upscale_mode', 'image_upscale_factor', 'jpeg_quality', 'png_compression', 'auto_scale', 'bubble_min_side_pixels', 'context_image_max_side_pixels'],
-    'batch': ['parallel_requests', 'batch_parallel_within_pages', 'batch_previous_context_images', 'batch_previous_context_texts', 'verbose', 'cpu', 'cleaning_only', 'upscaling_only', 'test_mode'],
+    'batch': ['parallel_requests', 'batch_parallel_within_pages', 'batch_previous_context_images', 'batch_previous_context_texts', 'retry_failed_once', 'overlap_llm_with_inpaint', 'verbose', 'cpu', 'cleaning_only', 'upscaling_only', 'test_mode'],
     'osb': ['osb_inpainting_method', 'osb_flux_backend', 'osb_flux_low_vram', 'osb_flux_sdcpp_cache_mode', 'osb_flux_sdcpp_diffusion_quant', 'osb_flux_sdcpp_text_encoder_quant', 'osb_flux_upscale_small_crops', 'osb_flux_group_regions', 'osb_flux_steps', 'osb_flux_luminance_correction', 'osb_flux_residual_threshold', 'osb_seed', 'osb_max_font_size', 'osb_min_font_size', 'osb_use_ligatures', 'osb_outline_width', 'osb_line_spacing', 'osb_use_subpixel', 'osb_font_hinting', 'osb_bbox_expansion', 'osb_render_expansion_narrow', 'osb_render_expansion_tiny', 'osb_render_expansion_aspect_threshold', 'osb_render_expansion_area_threshold', 'osb_text_box_proximity_ratio', 'osb_confidence', 'osb_filter_page_numbers', 'osb_page_filter_margin', 'osb_page_filter_min_area', 'osb_min_area_ignore_ratio', 'osb_min_side_pixels'],
 }
 
@@ -929,8 +731,6 @@ def kb_tiling_menu(cfg):
     flat = _tile_val_label(cfg, "tile_flat_threshold", str(MANHWA_SAFE_CUT_FLAT_THRESHOLD))
     band = _tile_val_label(cfg, "tile_seam_band_px", str(SEAM_CHECK_BAND_PX))
     diff = _tile_val_label(cfg, "tile_seam_diff_threshold", str(SEAM_DUPLICATE_DIFF_THRESHOLD))
-    min_cuts = _tile_val_label(cfg, "tile_min_cuts", str(MANHWA_TILE_MIN_CUTS))
-    max_cuts = _tile_val_label(cfg, "tile_max_cuts", str(MANHWA_TILE_MAX_CUTS))
 
     rows = [
         [InlineKeyboardButton(f"✂️ Tiling: {enabled_label}", callback_data="tile_bool_tile_enabled")],
@@ -940,8 +740,6 @@ def kb_tiling_menu(cfg):
         [InlineKeyboardButton(f"⬜ Flatness Threshold: {flat}", callback_data="tile_field_tile_flat_threshold")],
         [InlineKeyboardButton(f"📊 Seam Check Band (px): {band}", callback_data="tile_field_tile_seam_band_px")],
         [InlineKeyboardButton(f"🎯 Seam Duplicate Diff Threshold: {diff}", callback_data="tile_field_tile_seam_diff_threshold")],
-        [InlineKeyboardButton(f"🔽 Min Cuts: {min_cuts}", callback_data="tile_field_tile_min_cuts")],
-        [InlineKeyboardButton(f"🔼 Max Cuts: {max_cuts}", callback_data="tile_field_tile_max_cuts")],
         [InlineKeyboardButton("♻️ Reset All to Original/Default", callback_data="tile_reset_all")],
         [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")],
     ]
@@ -1607,12 +1405,7 @@ async def handle_callbacks(client, query: CallbackQuery):
             "• **Flatness Threshold**: how blank a row must be to count as "
             "a safe cut.\n"
             "• **Seam Check Band / Diff Threshold**: how the final duplicate-"
-            "text check compares pixels just above/below a seam.\n"
-            "• **Min Cuts**: lowest number of cuts allowed on a page — `0` "
-            "means it's fine for a page to pass through with no cuts at all.\n"
-            "• **Max Cuts**: highest number of cuts allowed on a page. Once "
-            "hit, whatever remains is kept as one final (possibly larger) "
-            "tile instead of forcing another cut through a bubble.\n\n"
+            "text check compares pixels just above/below a seam.\n\n"
             "_\"Original/Default\" = untouched, exactly like before this menu existed._",
             reply_markup=kb_tiling_menu(cfg)
         )
@@ -1627,15 +1420,9 @@ async def handle_callbacks(client, query: CallbackQuery):
             "tile_flat_threshold": "Flatness Threshold",
             "tile_seam_band_px": "Seam Check Band (px)",
             "tile_seam_diff_threshold": "Seam Duplicate Diff Threshold",
-            "tile_min_cuts": "Min Cuts",
-            "tile_max_cuts": "Max Cuts",
         }.get(field, field)
-        int_fields = {"tile_height", "tile_search_radius", "tile_trigger_height", "tile_seam_band_px", "tile_min_cuts", "tile_max_cuts"}
+        int_fields = {"tile_height", "tile_search_radius", "tile_trigger_height", "tile_seam_band_px"}
         hint = "a whole number, e.g. `1600`" if field in int_fields else "a decimal, e.g. `3.5`"
-        if field == "tile_min_cuts":
-            hint = "a whole number, `0` or more (0 = allow zero cuts)"
-        elif field == "tile_max_cuts":
-            hint = "a whole number, `1` or more (caps total cuts per page)"
         awaiting_reply[user_id] = {"type": "tile_field", "extra": {"field": field}}
         await safe_edit(
             query.message,
@@ -1661,7 +1448,6 @@ async def handle_callbacks(client, query: CallbackQuery):
         for field in (
             "tile_enabled", "tile_height", "tile_search_radius", "tile_trigger_height",
             "tile_flat_threshold", "tile_seam_band_px", "tile_seam_diff_threshold",
-            "tile_min_cuts", "tile_max_cuts",
         ):
             cfg[field] = None
         await save_user_config(user_id)
@@ -1806,25 +1592,16 @@ async def receive_files(client, message: Message):
         unknown_keys = [k for k in imported.keys() if k not in merged]
         known_imported = {k: v for k, v in imported.items() if k in merged}
         merged.update(known_imported)
-        # Full type-coercion + range-clamp + choice-validation pass. This is the
-        # untrusted-input entry point (a user-supplied JSON file can contain any
-        # type for any key -- strings where ints are expected, out-of-range floats,
-        # booleans as "yes"/"1", etc.), so every field goes through the schema
-        # before it's ever allowed to reach the subprocess or the tiling pipeline.
-        corrections = sanitize_and_coerce_config(merged)
+        cleared = sanitize_cfg_values(merged)
         user_settings[str(user_id)] = merged
         await save_user_config(user_id)
         cfg = get_user_config(user_id)
         report_lines = ["✅ **Settings imported and applied.**"]
-        if corrections:
-            report_lines.append("\n⚠️ **Some values were auto-corrected to safe defaults:**")
-            for field, bad_value, new_value in corrections[:15]:
-                if new_value is None:
-                    report_lines.append(f"• `{field}` = `{bad_value}` → reset to engine default (invalid/out of range)")
-                else:
-                    report_lines.append(f"• `{field}` = `{bad_value}` → `{new_value}`")
-            if len(corrections) > 15:
-                report_lines.append(f"...and {len(corrections) - 15} more.")
+        if cleared:
+            report_lines.append("\n⚠️ **Invalid values were reset to default:**")
+            for field, bad_value in cleared:
+                allowed = ", ".join(sorted(VALID_CHOICES[field]))
+                report_lines.append(f"• `{field}` = `{bad_value}` → not a valid choice (allowed: {allowed})")
         if unknown_keys:
             shown = ", ".join(unknown_keys[:10])
             more = " ..." if len(unknown_keys) > 10 else ""
@@ -2017,8 +1794,6 @@ async def handle_reply_capture(client, message: Message):
             "tile_flat_threshold": "Flatness Threshold",
             "tile_seam_band_px": "Seam Check Band (px)",
             "tile_seam_diff_threshold": "Seam Duplicate Diff Threshold",
-            "tile_min_cuts": "Min Cuts",
-            "tile_max_cuts": "Max Cuts",
         }.get(field, field)
 
         if text.lower() == "default":
@@ -2028,24 +1803,14 @@ async def handle_reply_capture(client, message: Message):
             await message.reply_text(f"✅ {pretty} reset to Original/Default.", reply_markup=kb_tiling_menu(cfg))
             return
 
-        int_fields = {"tile_height", "tile_search_radius", "tile_trigger_height", "tile_seam_band_px", "tile_min_cuts", "tile_max_cuts"}
+        int_fields = {"tile_height", "tile_search_radius", "tile_trigger_height", "tile_seam_band_px"}
         is_int_field = field in int_fields
-        # tile_min_cuts is the only field allowed to be 0 (0 = no forced cutting).
-        min_allowed = 0 if field == "tile_min_cuts" else 1
         try:
             value = int(text) if is_int_field else float(text)
-            if is_int_field:
-                if value < min_allowed:
-                    raise ValueError
-            elif value <= 0:
+            if value <= 0:
                 raise ValueError
         except ValueError:
-            if field == "tile_min_cuts":
-                hint = "a whole number, `0` or greater (e.g. `0` or `2`)"
-            elif is_int_field:
-                hint = "a positive whole number (e.g. `1600`)"
-            else:
-                hint = "a positive decimal (e.g. `3.5`)"
+            hint = "a positive whole number (e.g. `1600`)" if is_int_field else "a positive decimal (e.g. `3.5`)"
             await message.reply_text(f"❌ Please reply with {hint}, or `default` to reset. Try again.")
             return
 
@@ -2058,17 +1823,6 @@ async def handle_reply_capture(client, message: Message):
                     return
                 if field == "tile_trigger_height" and value < other_value:
                     await message.reply_text(f"❌ Trigger Height ({value}) shouldn't be less than Tile Height ({other_value}). Try again.")
-                    return
-
-        if field in ("tile_min_cuts", "tile_max_cuts"):
-            other_field = "tile_max_cuts" if field == "tile_min_cuts" else "tile_min_cuts"
-            other_value = cfg.get(other_field)
-            if other_value is not None:
-                if field == "tile_min_cuts" and value > other_value:
-                    await message.reply_text(f"❌ Min Cuts ({value}) shouldn't exceed Max Cuts ({other_value}). Try again.")
-                    return
-                if field == "tile_max_cuts" and value < other_value:
-                    await message.reply_text(f"❌ Max Cuts ({value}) shouldn't be less than Min Cuts ({other_value}). Try again.")
                     return
 
         cfg[field] = value
@@ -2251,19 +2005,6 @@ def _find_safe_cut_row(row_flatness, target_y, search_window, min_y, max_y, flat
             return up
     return None  
 
-def _safe_num(val, kind, fallback):
-    """Best-effort coercion used as a last line of defense inside the tiling math
-    itself. sanitize_and_coerce_config() should already have cleaned cfg by the
-    time it gets here, but tile_tall_pages/recompose_tiled_page can in principle
-    be called directly (e.g. future code paths, tests), so this guarantees the
-    arithmetic below can never receive a str/None/garbage value and TypeError."""
-    if val is None:
-        return fallback
-    try:
-        return int(val) if kind == "int" else float(val)
-    except (TypeError, ValueError):
-        return fallback
-
 def tile_tall_pages(input_dir, ordered_map, cfg=None):
     from PIL import Image
 
@@ -2271,29 +2012,10 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
     if cfg.get("tile_enabled") is False:
         return {} 
 
-    tile_height = _safe_num(cfg.get("tile_height"), "int", MANHWA_TILE_HEIGHT)
-    tile_search_radius = _safe_num(cfg.get("tile_search_radius"), "int", MANHWA_TILE_OVERLAP)
-    tile_trigger_height = _safe_num(cfg.get("tile_trigger_height"), "int", MANHWA_TILE_TRIGGER_HEIGHT)
-    tile_flat_threshold = _safe_num(cfg.get("tile_flat_threshold"), "float", MANHWA_SAFE_CUT_FLAT_THRESHOLD)
-    if tile_height < 1:
-        tile_height = MANHWA_TILE_HEIGHT
-    if tile_search_radius < 1:
-        tile_search_radius = MANHWA_TILE_OVERLAP
-    if tile_trigger_height < 1:
-        tile_trigger_height = MANHWA_TILE_TRIGGER_HEIGHT
-    # min_cuts: 0 = it's fine for a page to end up with zero cuts (untiled).
-    # max_cuts: hard cap on the number of cuts made per page — once reached,
-    # whatever height remains is kept as a single final tile (which may be
-    # taller than tile_height) instead of forcing another cut through a
-    # bubble/panel.
-    tile_min_cuts = _safe_num(cfg.get("tile_min_cuts"), "int", MANHWA_TILE_MIN_CUTS)
-    tile_max_cuts = _safe_num(cfg.get("tile_max_cuts"), "int", MANHWA_TILE_MAX_CUTS)
-    if tile_max_cuts < 1:
-        tile_max_cuts = 1
-    if tile_min_cuts < 0:
-        tile_min_cuts = 0
-    if tile_min_cuts > tile_max_cuts:
-        tile_min_cuts = tile_max_cuts
+    tile_height = cfg.get("tile_height") or MANHWA_TILE_HEIGHT
+    tile_search_radius = cfg.get("tile_search_radius") or MANHWA_TILE_OVERLAP
+    tile_trigger_height = cfg.get("tile_trigger_height") or MANHWA_TILE_TRIGGER_HEIGHT
+    tile_flat_threshold = cfg.get("tile_flat_threshold") or MANHWA_SAFE_CUT_FLAT_THRESHOLD
 
     manifest = {}
     for idx, fname in list(ordered_map.items()):
@@ -2314,15 +2036,10 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
             forced_cut_rows = []  # cuts that landed on non-flat (likely mid-art/mid-bubble) rows
             y = 0
             tile_n = 0
-            cuts_made = 0  # number of cuts actually made so far (tiles - 1)
             max_extend_attempts = 6  # cap the widening search so we don't loop forever on noisy art
             while y < height:
                 target_bottom = min(y + tile_height, height)
-                reached_max_cuts = cuts_made >= tile_max_cuts
-                if target_bottom >= height or reached_max_cuts:
-                    # Either we're at the true bottom of the strip, or we've hit the
-                    # Max Cuts cap — either way, take the rest as one final tile
-                    # rather than forcing another cut that might slice a bubble.
+                if target_bottom >= height:
                     cut = height
                     was_forced = False
                 else:
@@ -2350,36 +2067,15 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
                 if was_forced:
                     forced_cut_rows.append(cut)
 
-                # Guard against a zero/near-zero-height crop. This can happen when
-                # the safe-cut search (or its widening fallback) lands `cut` right
-                # on top of `y`, or when a prior iteration already consumed almost
-                # the entire remaining height. Saving a degenerate (0-2px tall) JPEG
-                # here produces a file that downstream OpenCV code can fail to
-                # decode, surfacing as a "!_src.empty()" cvtColor assertion later
-                # in the pipeline. If the slice is too thin to be a real tile,
-                # just extend it to the bottom of the page instead of emitting it.
-                MIN_TILE_HEIGHT_PX = 8
-                if cut - y < MIN_TILE_HEIGHT_PX:
-                    cut = height
-                    was_forced = False
-
                 tile = im.crop((0, y, width, cut))
                 tile_name = f"{os.path.splitext(fname)[0]}_tile{tile_n:03d}.jpg"
                 tile.save(os.path.join(input_dir, tile_name), quality=95)
                 tile_files.append(tile_name)
                 tile_heights.append(cut - y)
                 tile_n += 1
-                if cut < height:
-                    cuts_made += 1
                 if cut >= height:
                     break
                 y = cut
-
-            # Min Cuts: if this page ended up with fewer cuts than required and it
-            # still had room to cut further, that's fine — min_cuts=0 just means we
-            # never force extra cuts beyond what the page actually needs. We only
-            # log tile count here; we never manufacture additional cuts purely to
-            # satisfy a minimum, since inventing a cut risks slicing a bubble.
 
             manifest[idx] = {
                 "tiles": tile_files,
@@ -2387,8 +2083,7 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
                 "width": width,
                 "original_height": height,
                 "original_name": fname,
-                "forced_cut_rows": forced_cut_rows,
-                "cuts_made": cuts_made,
+                "forced_cut_rows": forced_cut_rows,  
             }
         os.remove(path)  
     return manifest
@@ -2415,10 +2110,8 @@ def _seam_looks_duplicated(recomposed_im, seam_y, band_px=SEAM_CHECK_BAND_PX, di
 def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None):
     from PIL import Image
     cfg = cfg or {}
-    seam_band_px = _safe_num(cfg.get("tile_seam_band_px"), "int", SEAM_CHECK_BAND_PX)
-    seam_diff_threshold = _safe_num(cfg.get("tile_seam_diff_threshold"), "float", SEAM_DUPLICATE_DIFF_THRESHOLD)
-    if seam_band_px < 1:
-        seam_band_px = SEAM_CHECK_BAND_PX
+    seam_band_px = cfg.get("tile_seam_band_px") or SEAM_CHECK_BAND_PX
+    seam_diff_threshold = cfg.get("tile_seam_diff_threshold") or SEAM_DUPLICATE_DIFF_THRESHOLD
 
     tiles = manifest_entry["tiles"]
     heights = manifest_entry["heights"]
@@ -2527,7 +2220,9 @@ CLI_MAPPINGS = {
     "auto_scale": ("--no-auto-scale", "bool_invert"), "bubble_min_side_pixels": ("--bubble-min-side-pixels", "val"),
     "context_image_max_side_pixels": ("--context-image-max-side-pixels", "val"), "parallel_requests": ("--parallel-requests", "val"),
     "batch_parallel_within_pages": ("--batch-parallel-within-pages", "bool_true"), "batch_previous_context_images": ("--batch-previous-context-images", "val"),
-    "batch_previous_context_texts": ("--batch-previous-context-texts", "val"), "verbose": ("--verbose", "bool_true"),
+    "batch_previous_context_texts": ("--batch-previous-context-texts", "val"),
+    "retry_failed_once": ("--retry-failed-once", "bool_true"), "overlap_llm_with_inpaint": ("--overlap-llm-with-inpaint", "bool_true"),
+    "verbose": ("--verbose", "bool_true"),
     "cpu": ("--cpu", "bool_true"), "cleaning_only": ("--cleaning-only", "bool_true"), "upscaling_only": ("--upscaling-only", "bool_true"),
     "test_mode": ("--test-mode", "bool_true"), "osb_inpainting_method": ("--osb-inpainting-method", "val"),
     "osb_flux_backend": ("--osb-flux-backend", "val"), "osb_flux_low_vram": ("--osb-flux-low-vram", "bool_true"),
@@ -2680,49 +2375,30 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             if cli_supports_flag("--osb-font-dir"):
                 cmd += ["--osb-font-dir", font_dir_for_run]
 
-        # SAFETY NET: this is the last point before cfg values become subprocess
-        # argv, so run the FULL type-coercion + range-clamp + choice-validation
-        # pass here regardless of where cfg came from (fresh menu edits, an
-        # imported JSON, or an old on-disk row from a previous bot version).
-        # This guarantees no string-typed number, out-of-range value, or invalid
-        # choice can ever reach argparse and abort the whole job.
-        last_minute_corrections = sanitize_and_coerce_config(cfg)
-        if last_minute_corrections:
+        # SAFETY NET: strip any choice-restricted field holding an invalid value
+        # (e.g. a stale/hand-edited translation_mode like "contextual") before it
+        # can reach main.py's argparse and abort the whole job with "invalid choice".
+        last_minute_cleared = sanitize_cfg_values(cfg)
+        if last_minute_cleared:
             await save_user_config(user_id)
-            bad_list = ", ".join(
-                f"{f}='{old_v}'->'{new_v}'" if new_v is not None else f"{f}='{old_v}'->default"
-                for f, old_v, new_v in last_minute_corrections[:10]
-            )
-            more = f" (+{len(last_minute_corrections) - 10} more)" if len(last_minute_corrections) > 10 else ""
+            bad_list = ", ".join(f"{f}='{v}'" for f, v in last_minute_cleared)
             await safe_edit(
                 status_msg,
-                f"⚠️ Corrected setting(s) before running: {bad_list}{more}. Continuing..."
+                f"⚠️ Corrected invalid setting(s) before running: {bad_list} "
+                f"(reset to engine default). Continuing..."
             )
 
         # INJECT ALL CUSTOM PARAMETERS
-        # Defense-in-depth: even after sanitize_and_coerce_config() above, wrap
-        # every single flag append in its own try/except so one unexpected value
-        # (e.g. a key whose CLI mapping doesn't match its expected val_type, or a
-        # dict/list slipping through from a hand-edited JSON) can only skip that
-        # one flag instead of throwing and killing the whole translation job.
-        skipped_flags = []
         for key, config_meta in CLI_MAPPINGS.items():
-            try:
-                flag, val_type = config_meta
-                val = cfg.get(key)
-                if val is None or not cli_supports_flag(flag):
-                    continue
+            flag, val_type = config_meta
+            val = cfg.get(key)
+            if val is not None and cli_supports_flag(flag):
                 if val_type == "val":
                     cmd += [flag, str(val)]
                 elif val_type == "bool_true" and val is True:
                     cmd.append(flag)
                 elif val_type == "bool_invert" and val is False:
                     cmd.append(flag)
-            except Exception:
-                skipped_flags.append(key)
-                continue
-        if skipped_flags:
-            print(f"⚠️ Skipped unusable setting(s) for this run: {', '.join(skipped_flags)}")
 
         await safe_edit(status_msg, 
             build_status_text(mode_label, "🧠 OCR + Translation running", file_idx, total_files, 0, total_images, 40),

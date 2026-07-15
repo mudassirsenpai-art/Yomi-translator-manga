@@ -2368,7 +2368,7 @@ def _seam_looks_duplicated(recomposed_im, seam_y, band_px=SEAM_CHECK_BAND_PX, di
     diff = np.abs(upper_band - lower_band).mean()
     return diff < diff_threshold
 
-def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None):
+def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None, input_dir=None):
     from PIL import Image
     cfg = cfg or {}
     seam_band_px = cfg.get("tile_seam_band_px") or SEAM_CHECK_BAND_PX
@@ -2389,8 +2389,33 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None):
             if os.path.exists(candidate):
                 found = candidate
                 break
+        if found is None and input_dir:
+            # The engine only writes an output file for a tile if it actually
+            # ran translation on it. A tile with no speech bubbles/text (e.g.
+            # pure background art) is legitimately skipped - there's nothing
+            # to translate - so it never appears in translated_dir even though
+            # nothing went wrong. That's NOT a real failure, so fall back to
+            # the original untranslated tile from input_dir instead of
+            # treating the whole page as broken.
+            for ext in IMAGE_EXTS:
+                original_candidate = os.path.join(input_dir, stem + ext)
+                if os.path.exists(original_candidate):
+                    found = original_candidate
+                    break
         if found is None:
-            return None  
+            # This page can't be recomposed - clean up any sibling tiles that
+            # DID translate successfully so they don't linger as orphaned
+            # "<stem>_tileNNN.jpg" files. Left in place, PDF packaging's
+            # stem-based regrouping would still pick them up and try to
+            # stitch an incomplete page, and CBZ/ZIP output would silently
+            # include a partial page under a tile-suffixed filename instead
+            # of clearly showing the page as missing.
+            for p in translated_tile_paths:
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+            return None
         translated_tile_paths.append(found)
 
     recomposed = Image.new("RGB", (width, total_height), (255, 255, 255))
@@ -2755,8 +2780,20 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             await safe_edit(status_msg, build_status_text(mode_label, "🧵 Recomposing tiled pages", file_idx, total_files, total_images, total_images, 85))
             recompose_failures = []
             duplicate_suspected_pages = []
+            recompose_errors = []
             for page_idx, manifest_entry in tile_manifest.items():
-                result = recompose_tiled_page(file_translated_dir, page_idx, manifest_entry, cfg=cfg)
+                try:
+                    result = recompose_tiled_page(file_translated_dir, page_idx, manifest_entry, cfg=cfg, input_dir=input_dir)
+                except Exception as recompose_err:
+                    # A corrupt/truncated tile image (e.g. the engine was killed
+                    # mid-write) previously propagated straight out of this loop
+                    # and crashed the whole job with no user-facing message.
+                    # Treat it the same as a missing-tile failure instead: skip
+                    # this one page and keep going.
+                    print(f"⚠️ recompose_tiled_page failed for page {page_idx}: {type(recompose_err).__name__}: {recompose_err}")
+                    recompose_errors.append((page_idx, recompose_err))
+                    recompose_failures.append(page_idx)
+                    continue
                 if result is None:
                     recompose_failures.append(page_idx)
                     continue

@@ -70,6 +70,16 @@ MANHWA_TILE_OVERLAP = 400
 MANHWA_TILE_TRIGGER_HEIGHT = 3800
 MANHWA_SAFE_CUT_FLAT_THRESHOLD = 3.5
 
+# Min/Max tiles-per-page bounds. Bubble/panel safety always wins over hitting
+# these counts: we will happily land BELOW min (or anywhere under max) rather
+# than ever slice through a bubble. Max is a ceiling, not a target — landing
+# under it (even close to Min) is completely fine.
+MANHWA_TILE_MIN_CUTS = 1
+MANHWA_TILE_MAX_CUTS = 10
+# "Auto" search radius: when the fixed radius doesn't find a safe row, keep
+# widening the search (in tile_search_radius steps) instead of giving up.
+MANHWA_TILE_SEARCH_RADIUS_AUTO_MAX_EXTEND = 40
+
 DEFAULT_SYSTEM_PROMPT_NAME = "Default Localization Engine"
 DEFAULT_SYSTEM_PROMPT_TEXT = (
     "You are a professional multi-language manga and comic localization engine.\n"
@@ -127,7 +137,8 @@ def default_config():
         # Tiling Settings
         "tile_enabled": None, "tile_height": None, "tile_search_radius": None, 
         "tile_trigger_height": None, "tile_flat_threshold": None, "tile_seam_band_px": None, 
-        "tile_seam_diff_threshold": None,
+        "tile_seam_diff_threshold": None, "tile_min_cuts": None, "tile_max_cuts": None,
+        "tile_search_radius_auto": None,
 
         # UI Modifiable Flags (Appearance, Detect)
         "min_font_size": None, "max_font_size": None, "auto_vertical_text": None,
@@ -726,22 +737,41 @@ def kb_tiling_menu(cfg):
     enabled = cfg.get("tile_enabled")
     enabled_label = "Original/Default (On)" if enabled is None else ("✅ On" if enabled else "❌ Off")
     height = _tile_val_label(cfg, "tile_height", str(MANHWA_TILE_HEIGHT))
-    radius = _tile_val_label(cfg, "tile_search_radius", str(MANHWA_TILE_OVERLAP))
     trigger = _tile_val_label(cfg, "tile_trigger_height", str(MANHWA_TILE_TRIGGER_HEIGHT))
     flat = _tile_val_label(cfg, "tile_flat_threshold", str(MANHWA_SAFE_CUT_FLAT_THRESHOLD))
     band = _tile_val_label(cfg, "tile_seam_band_px", str(SEAM_CHECK_BAND_PX))
     diff = _tile_val_label(cfg, "tile_seam_diff_threshold", str(SEAM_DUPLICATE_DIFF_THRESHOLD))
+    min_cuts = _tile_val_label(cfg, "tile_min_cuts", str(MANHWA_TILE_MIN_CUTS))
+    max_cuts = _tile_val_label(cfg, "tile_max_cuts", str(MANHWA_TILE_MAX_CUTS))
+
+    radius_auto = cfg.get("tile_search_radius_auto")
+    if radius_auto:
+        radius = "🔁 Auto (expands until a safe cut is found)"
+    else:
+        radius = _tile_val_label(cfg, "tile_search_radius", str(MANHWA_TILE_OVERLAP))
 
     rows = [
         [InlineKeyboardButton(f"✂️ Tiling: {enabled_label}", callback_data="tile_bool_tile_enabled")],
         [InlineKeyboardButton(f"📏 Trigger Height (px): {trigger}", callback_data="tile_field_tile_trigger_height")],
         [InlineKeyboardButton(f"📐 Tile Height (px): {height}", callback_data="tile_field_tile_height")],
-        [InlineKeyboardButton(f"🔍 Safe-Cut Search Radius (px): {radius}", callback_data="tile_field_tile_search_radius")],
+        [InlineKeyboardButton(f"⬇️ Min Cuts: {min_cuts}", callback_data="tile_field_tile_min_cuts")],
+        [InlineKeyboardButton(f"⬆️ Max Cuts: {max_cuts}", callback_data="tile_field_tile_max_cuts")],
+        [InlineKeyboardButton(f"🔍 Safe-Cut Search Radius (px): {radius}", callback_data="tile_search_radius_open")],
         [InlineKeyboardButton(f"⬜ Flatness Threshold: {flat}", callback_data="tile_field_tile_flat_threshold")],
         [InlineKeyboardButton(f"📊 Seam Check Band (px): {band}", callback_data="tile_field_tile_seam_band_px")],
         [InlineKeyboardButton(f"🎯 Seam Duplicate Diff Threshold: {diff}", callback_data="tile_field_tile_seam_diff_threshold")],
         [InlineKeyboardButton("♻️ Reset All to Original/Default", callback_data="tile_reset_all")],
         [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+def kb_tile_search_radius_menu(cfg):
+    auto = cfg.get("tile_search_radius_auto")
+    radius = _tile_val_label(cfg, "tile_search_radius", str(MANHWA_TILE_OVERLAP))
+    rows = [
+        [InlineKeyboardButton(f"{'✅ ' if auto else ''}🔁 Auto (recommended)", callback_data="tileradiusauto_on")],
+        [InlineKeyboardButton(f"{'✅ ' if not auto else ''}✏️ Manual Value: {radius}", callback_data="tileradiusauto_off")],
+        [InlineKeyboardButton("🔙 Back", callback_data="menu_tiling")],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -1400,8 +1430,14 @@ async def handle_callbacks(client, query: CallbackQuery):
             "get crushed down and bubbles don't vanish.\n\n"
             "• **Trigger Height**: pages taller than this get tiled at all.\n"
             "• **Tile Height**: target height per tile.\n"
+            "• **Min / Max Cuts**: bounds on how many tiles a page can be split "
+            "into. We never go below Min or above Max — but a bubble is NEVER "
+            "cut just to hit these numbers. If a page fits safely in fewer "
+            "tiles than Min, that's fine.\n"
             "• **Safe-Cut Search Radius**: how far to search for a blank row "
-            "near the target cut line, so a cut never lands mid-bubble.\n"
+            "near the target cut line, so a cut never lands mid-bubble. "
+            "**Auto** keeps widening the search until it finds one instead "
+            "of giving up.\n"
             "• **Flatness Threshold**: how blank a row must be to count as "
             "a safe cut.\n"
             "• **Seam Check Band / Diff Threshold**: how the final duplicate-"
@@ -1420,9 +1456,16 @@ async def handle_callbacks(client, query: CallbackQuery):
             "tile_flat_threshold": "Flatness Threshold",
             "tile_seam_band_px": "Seam Check Band (px)",
             "tile_seam_diff_threshold": "Seam Duplicate Diff Threshold",
+            "tile_min_cuts": "Min Cuts",
+            "tile_max_cuts": "Max Cuts",
         }.get(field, field)
-        int_fields = {"tile_height", "tile_search_radius", "tile_trigger_height", "tile_seam_band_px"}
+        int_fields = {
+            "tile_height", "tile_search_radius", "tile_trigger_height", "tile_seam_band_px",
+            "tile_min_cuts", "tile_max_cuts",
+        }
         hint = "a whole number, e.g. `1600`" if field in int_fields else "a decimal, e.g. `3.5`"
+        if field in ("tile_min_cuts", "tile_max_cuts"):
+            hint = "a whole number of tiles, e.g. `2`"
         awaiting_reply[user_id] = {"type": "tile_field", "extra": {"field": field}}
         await safe_edit(
             query.message,
@@ -1433,6 +1476,32 @@ async def handle_callbacks(client, query: CallbackQuery):
 
     if data == "tile_bool_tile_enabled":
         await safe_edit(query.message, "✂️ **Tiling Enabled:**", reply_markup=kb_tile_bool_select(cfg, "tile_enabled"))
+        return
+
+    if data == "tile_search_radius_open":
+        await safe_edit(
+            query.message,
+            "🔍 **Safe-Cut Search Radius**\n\n"
+            "• **Auto** (recommended): if no safe row is found nearby, the search "
+            "keeps widening step-by-step until one is — a bubble is never cut just "
+            "because a fixed radius ran out.\n"
+            "• **Manual**: fixed radius in px, same as before.",
+            reply_markup=kb_tile_search_radius_menu(cfg)
+        )
+        return
+
+    if data == "tileradiusauto_on":
+        cfg["tile_search_radius_auto"] = True
+        await save_user_config(user_id)
+        await safe_answer(query, "Search radius set to Auto")
+        await safe_edit(query.message, "🔍 **Safe-Cut Search Radius**", reply_markup=kb_tile_search_radius_menu(cfg))
+        return
+
+    if data == "tileradiusauto_off":
+        cfg["tile_search_radius_auto"] = False
+        await save_user_config(user_id)
+        await safe_answer(query, "Search radius set to Manual")
+        await safe_edit(query.message, "🔍 **Safe-Cut Search Radius**", reply_markup=kb_tile_search_radius_menu(cfg))
         return
 
     if data.startswith("tileboolset_"):
@@ -1448,6 +1517,7 @@ async def handle_callbacks(client, query: CallbackQuery):
         for field in (
             "tile_enabled", "tile_height", "tile_search_radius", "tile_trigger_height",
             "tile_flat_threshold", "tile_seam_band_px", "tile_seam_diff_threshold",
+            "tile_min_cuts", "tile_max_cuts", "tile_search_radius_auto",
         ):
             cfg[field] = None
         await save_user_config(user_id)
@@ -1794,6 +1864,8 @@ async def handle_reply_capture(client, message: Message):
             "tile_flat_threshold": "Flatness Threshold",
             "tile_seam_band_px": "Seam Check Band (px)",
             "tile_seam_diff_threshold": "Seam Duplicate Diff Threshold",
+            "tile_min_cuts": "Min Cuts",
+            "tile_max_cuts": "Max Cuts",
         }.get(field, field)
 
         if text.lower() == "default":
@@ -1803,7 +1875,10 @@ async def handle_reply_capture(client, message: Message):
             await message.reply_text(f"✅ {pretty} reset to Original/Default.", reply_markup=kb_tiling_menu(cfg))
             return
 
-        int_fields = {"tile_height", "tile_search_radius", "tile_trigger_height", "tile_seam_band_px"}
+        int_fields = {
+            "tile_height", "tile_search_radius", "tile_trigger_height", "tile_seam_band_px",
+            "tile_min_cuts", "tile_max_cuts",
+        }
         is_int_field = field in int_fields
         try:
             value = int(text) if is_int_field else float(text)
@@ -1824,6 +1899,19 @@ async def handle_reply_capture(client, message: Message):
                 if field == "tile_trigger_height" and value < other_value:
                     await message.reply_text(f"❌ Trigger Height ({value}) shouldn't be less than Tile Height ({other_value}). Try again.")
                     return
+
+        # Min Cuts must never exceed Max Cuts, and vice versa.
+        if field in ("tile_min_cuts", "tile_max_cuts"):
+            other_field = "tile_max_cuts" if field == "tile_min_cuts" else "tile_min_cuts"
+            other_value = cfg.get(other_field)
+            if other_value is None:
+                other_value = MANHWA_TILE_MAX_CUTS if other_field == "tile_max_cuts" else MANHWA_TILE_MIN_CUTS
+            if field == "tile_min_cuts" and value > other_value:
+                await message.reply_text(f"❌ Min Cuts ({value}) can't be more than Max Cuts ({other_value}). Try again.")
+                return
+            if field == "tile_max_cuts" and value < other_value:
+                await message.reply_text(f"❌ Max Cuts ({value}) can't be less than Min Cuts ({other_value}). Try again.")
+                return
 
         cfg[field] = value
         await save_user_config(user_id)
@@ -2005,6 +2093,29 @@ def _find_safe_cut_row(row_flatness, target_y, search_window, min_y, max_y, flat
             return up
     return None  
 
+def _find_safe_cut_row_expanding(row_flatness, target_y, min_y, max_y, flat_threshold, base_window, auto, max_extend_steps):
+    """
+    Looks for a safe (flat/non-bubble) row near target_y. If none is found within
+    base_window and `auto` is on, keeps widening the search window step by step
+    (instead of giving up) so a bubble is never cut just because a fixed radius
+    ran out. Returns the row index, or None if truly nothing safe exists in
+    [min_y, max_y] even at full width — in which case the caller must NOT cut here.
+    """
+    window = base_window
+    cut = _find_safe_cut_row(row_flatness, target_y, window, min_y, max_y, flat_threshold)
+    if cut is not None or not auto:
+        return cut
+    steps = 0
+    while cut is None and steps < max_extend_steps:
+        window += base_window
+        steps += 1
+        cut = _find_safe_cut_row(row_flatness, target_y, window, min_y, max_y, flat_threshold)
+    return cut
+
+def _any_safe_row_exists(row_flatness, min_y, max_y, flat_threshold):
+    segment = row_flatness[min_y:max_y + 1]
+    return bool((segment < flat_threshold).any())
+
 def tile_tall_pages(input_dir, ordered_map, cfg=None):
     from PIL import Image
 
@@ -2016,6 +2127,14 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
     tile_search_radius = cfg.get("tile_search_radius") or MANHWA_TILE_OVERLAP
     tile_trigger_height = cfg.get("tile_trigger_height") or MANHWA_TILE_TRIGGER_HEIGHT
     tile_flat_threshold = cfg.get("tile_flat_threshold") or MANHWA_SAFE_CUT_FLAT_THRESHOLD
+    radius_auto = cfg.get("tile_search_radius_auto")
+    if radius_auto is None:
+        radius_auto = True  # Auto is the recommended/default behavior
+    min_cuts = cfg.get("tile_min_cuts") or MANHWA_TILE_MIN_CUTS
+    max_cuts = cfg.get("tile_max_cuts") or MANHWA_TILE_MAX_CUTS
+    # "cuts" here means resulting tiles for the page.
+    min_tiles = max(1, min_cuts)
+    max_tiles = max(min_tiles, max_cuts)
 
     manifest = {}
     for idx, fname in list(ordered_map.items()):
@@ -2029,43 +2148,54 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
 
             im = im.convert("RGB")
             row_flatness = _compute_row_flatness(im)
-            search_window = tile_search_radius  
 
             tile_files = []
             tile_heights = []
-            forced_cut_rows = []  # cuts that landed on non-flat (likely mid-art/mid-bubble) rows
+            forced_cut_rows = []  # kept for compatibility; stays empty now since we never force a bubble cut
             y = 0
             tile_n = 0
-            max_extend_attempts = 6  # cap the widening search so we don't loop forever on noisy art
-            while y < height:
-                target_bottom = min(y + tile_height, height)
-                if target_bottom >= height:
-                    cut = height
-                    was_forced = False
-                else:
-                    cut = _find_safe_cut_row(row_flatness, target_bottom, search_window, y + 1, height - 1, tile_flat_threshold)
-                    was_forced = cut is None
-                    extended_target = target_bottom
-                    attempts = 0
-                    while cut is None and extended_target < height and attempts < max_extend_attempts:
-                        extended_target = min(extended_target + tile_search_radius, height)
-                        attempts += 1
-                        if extended_target >= height:
-                            cut = height
-                            was_forced = False  # cutting at the true bottom of the strip is fine
-                            break
-                        cut = _find_safe_cut_row(row_flatness, extended_target, search_window, y + 1, height - 1, tile_flat_threshold)
-                        if cut is not None:
-                            was_forced = False
-                    if cut is None:
-                        # Never found a flat row even after widening the search — fall back to
-                        # the original target and flag it, since this cut may slice through
-                        # a bubble/panel and cause duplicated or clipped content at the seam.
-                        cut = target_bottom
-                        was_forced = True
+            max_extend_steps = MANHWA_TILE_SEARCH_RADIUS_AUTO_MAX_EXTEND
 
-                if was_forced:
-                    forced_cut_rows.append(cut)
+            while y < height:
+                remaining = height - y
+                tiles_so_far = tile_n  # completed tiles before this one
+                # Bubble safety always wins: we only ever try to land a cut short of
+                # max_tiles. If we've already reached max_tiles - 1 completed tiles,
+                # this must be the final tile — ride out to the end of the image.
+                at_last_allowed_tile = (tiles_so_far >= max_tiles - 1)
+
+                target_bottom = min(y + tile_height, height)
+
+                if target_bottom >= height or at_last_allowed_tile:
+                    cut = height
+                else:
+                    cut = _find_safe_cut_row_expanding(
+                        row_flatness, target_bottom, y + 1, height - 1,
+                        tile_flat_threshold, tile_search_radius, radius_auto, max_extend_steps
+                    )
+                    if cut is None:
+                        # No safe row near the target even after (auto-)expanding the
+                        # search. Never cut through a bubble to hit Min Cuts — instead
+                        # push the target further down and keep looking, as long as
+                        # doing so still respects Max Cuts (checked via at_last_allowed_tile
+                        # above on the next loop iteration) and a safe row remains ahead.
+                        extended_target = target_bottom
+                        while cut is None and extended_target < height:
+                            extended_target = min(extended_target + tile_search_radius, height)
+                            if extended_target >= height:
+                                cut = height
+                                break
+                            if not _any_safe_row_exists(row_flatness, y + 1, height - 1, tile_flat_threshold):
+                                # No safe row anywhere left in the remainder of the
+                                # image — ride out to the end rather than force a cut.
+                                cut = height
+                                break
+                            cut = _find_safe_cut_row_expanding(
+                                row_flatness, extended_target, y + 1, height - 1,
+                                tile_flat_threshold, tile_search_radius, radius_auto, max_extend_steps
+                            )
+                    if cut is None:
+                        cut = height
 
                 tile = im.crop((0, y, width, cut))
                 tile_name = f"{os.path.splitext(fname)[0]}_tile{tile_n:03d}.jpg"

@@ -2737,9 +2737,23 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
                     was_forced = False
 
                 tile = im.crop((0, y, width, cut))
-                tile_name = f"{os.path.splitext(fname)[0]}_tile{tile_n:03d}.jpg"
-                tile_path = os.path.join(input_dir, tile_name)
-                tile.save(tile_path, quality=95)
+                tile_stem = f"{os.path.splitext(fname)[0]}_tile{tile_n:03d}"
+                # Same libjpeg 65500px-per-side limit as the stitching stages.
+                # A tile's height is bounded by tile_height, but its WIDTH is
+                # inherited unchanged from the source page (which, after
+                # webtoon aggregation, can be the max width across up to 10
+                # stitched pages, or simply an unusually wide scan/spread).
+                # Guard both dimensions, not just height, or PIL raises
+                # "broken data stream when writing image file" mid-encode.
+                JPEG_MAX_DIMENSION = 65500
+                if tile.width > JPEG_MAX_DIMENSION or tile.height > JPEG_MAX_DIMENSION:
+                    tile_name = f"{tile_stem}.png"
+                    tile_path = os.path.join(input_dir, tile_name)
+                    tile.save(tile_path)
+                else:
+                    tile_name = f"{tile_stem}.jpg"
+                    tile_path = os.path.join(input_dir, tile_name)
+                    tile.save(tile_path, quality=95)
                 tile_files.append(tile_name)
                 tile_heights.append(cut - y)
                 tile_has_text.append(tile_has_probable_text(tile))

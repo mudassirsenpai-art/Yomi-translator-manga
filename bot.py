@@ -2133,9 +2133,16 @@ def _stitch_group_vertically(input_dir, base_name, slice_files):
         x_offset = (total_width - im.width) // 2
         stitched.paste(im, (x_offset, y_offset))
         y_offset += im.height
-    out_name = f"{base_name}__stitched.jpg"
-    out_path = os.path.join(input_dir, out_name)
-    stitched.save(out_path, quality=95)
+    out_stem = f"{base_name}__stitched"
+    JPEG_MAX_DIMENSION = 65500
+    if total_height > JPEG_MAX_DIMENSION or total_width > JPEG_MAX_DIMENSION:
+        out_name = f"{out_stem}.png"
+        out_path = os.path.join(input_dir, out_name)
+        stitched.save(out_path)
+    else:
+        out_name = f"{out_stem}.jpg"
+        out_path = os.path.join(input_dir, out_name)
+        stitched.save(out_path, quality=95)
     for im in imgs:
         im.close()
     for f in slice_files:
@@ -2284,9 +2291,24 @@ def aggregate_webtoon_batches(input_dir, ordered_map, cfg=None):
             stitched.paste(pulled_region, (0, y_offset))
             boundary_pulled_px = extra_bottom_px
 
-        out_name = f"webtoon_batch_{new_idx:03d}.jpg"
-        out_path = os.path.join(input_dir, out_name)
-        stitched.save(out_path, quality=95)
+        out_stem = f"webtoon_batch_{new_idx:03d}"
+        final_height = total_height + extra_bottom_px
+        # JPEG has a hard 65500px per-dimension limit (libjpeg encodes width/
+        # height in a 16-bit field). Stitching up to `webtoon_max_pages` full
+        # manhwa pages together (each often 3000-15000px tall) can easily
+        # exceed that, and PIL raises exactly "OSError: broken data stream
+        # when writing image file" if you try to save an oversized strip as
+        # .jpg. PNG has no such limit, so use it whenever the strip is too
+        # tall for JPEG to encode safely.
+        JPEG_MAX_DIMENSION = 65500
+        if final_height > JPEG_MAX_DIMENSION or width > JPEG_MAX_DIMENSION:
+            out_name = f"{out_stem}.png"
+            out_path = os.path.join(input_dir, out_name)
+            stitched.save(out_path)
+        else:
+            out_name = f"{out_stem}.jpg"
+            out_path = os.path.join(input_dir, out_name)
+            stitched.save(out_path, quality=95)
 
         for im in imgs:
             im.close()
@@ -2877,8 +2899,20 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None, inp
             flagged_seams.append(seam_y)
 
     out_name = manifest_entry["original_name"]
-    out_path = os.path.join(translated_dir, out_name)
-    recomposed.save(out_path, quality=95)
+    out_stem, out_ext = os.path.splitext(out_name)
+    JPEG_MAX_DIMENSION = 65500
+    # Same libjpeg 65500px-per-side limit as the stitching stages: a
+    # recomposed webtoon-batch page can be taller than that, so force PNG
+    # (no dimension limit) instead of letting PIL raise "broken data stream
+    # when writing image file" mid-encode.
+    if recomposed.height > JPEG_MAX_DIMENSION or recomposed.width > JPEG_MAX_DIMENSION:
+        out_name = f"{out_stem}.png"
+        out_path = os.path.join(translated_dir, out_name)
+        recomposed.save(out_path)
+    else:
+        out_name = f"{out_stem}{out_ext if out_ext.lower() in ('.jpg', '.jpeg') else '.jpg'}"
+        out_path = os.path.join(translated_dir, out_name)
+        recomposed.save(out_path, quality=95)
     for p in translated_tile_paths:
         # Only clean up tiles that live in translated_dir (the engine's output
         # or a restored textless tile). Never remove a fallback tile that was

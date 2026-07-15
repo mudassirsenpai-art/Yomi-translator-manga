@@ -65,17 +65,13 @@ jobs:
           pip install -r requirements.txt
           # Pillow: image stitching / tiling / PDF packaging
           # numpy: row-flatness analysis for safe-cut Manhwa tiling
-          # opencv-python-headless: real speech-bubble detection (cv2.findContours /
-          #   connectedComponentsWithStats) for Smart Webtoon Stitching's
-          #   bubble-avoidance cut logic. Headless build avoids pulling in a
-          #   GUI/Qt stack this runner doesn't need.
           # PyMuPDF: pure-Python PDF page extraction (replaces pdftoppm)
           # openai, pyrogram, tgcrypto: bot runtime deps
-          pip install Pillow numpy opencv-python-headless openai pyrogram tgcrypto PyMuPDF
+          pip install Pillow numpy openai pyrogram tgcrypto PyMuPDF
 
       - name: Verify Core Imports
         run: |
-          python -c "import fitz; import PIL; import numpy; import cv2; import pyrogram; import tgcrypto; print('core imports OK')"
+          python -c "import fitz; import PIL; import numpy; import pyrogram; import tgcrypto; print('core imports OK')"
 
       - name: Run Telegram Bot
         env:

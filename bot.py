@@ -147,10 +147,6 @@ def default_config():
         "tile_trigger_height": None, "tile_flat_threshold": None, "tile_seam_band_px": None, 
         "tile_seam_diff_threshold": None, "tile_min_cuts": None, "tile_max_cuts": None,
 
-        # Smart Webtoon Stitching Settings (Problem No. 3)
-        "webtoon_enabled": True, "webtoon_max_pages": None,
-        "webtoon_bubble_min_area": None, "webtoon_white_thresh": None, "webtoon_bubble_pad_px": None,
-
         # UI Modifiable Flags (Appearance, Detect)
         "min_font_size": None, "max_font_size": None, "auto_vertical_text": None,
         "line_spacing_mult": None, "subpixel_rendering": None, "font_hinting": None,
@@ -304,7 +300,6 @@ def kb_main_menu(cfg=None):
         rows.append([InlineKeyboardButton("🎯 Detection Settings", callback_data="menu_detection")])
     if cfg is not None and cfg.get("content_type") == "manhwa":
         rows.append([InlineKeyboardButton("✂️ Tiling Settings", callback_data="menu_tiling")])
-        rows.append([InlineKeyboardButton("🧵 Smart Webtoon Stitching", callback_data="menu_webtoon")])
     rows += [
         [InlineKeyboardButton("🧠 Generation Settings", callback_data="xf_group_generation")],
         [InlineKeyboardButton("🧹 Cleaning & Upscaling", callback_data="xf_group_cleaning")],
@@ -777,39 +772,6 @@ def kb_tile_bool_select(cfg, field):
         [InlineKeyboardButton(f"{mark(False)}Off", callback_data=f"tileboolset_{field}_off")],
         [InlineKeyboardButton(f"{'✅ ' if val is None else ''}Original/Default", callback_data=f"tileboolset_{field}_default")],
         [InlineKeyboardButton("🔙 Back", callback_data="menu_tiling")],
-    ]
-    return InlineKeyboardMarkup(rows)
-
-def _webtoon_val_label(cfg, field, default_display):
-    val = cfg.get(field)
-    return default_display if val is None else str(val)
-
-def kb_webtoon_menu(cfg):
-    enabled = cfg.get("webtoon_enabled", True)
-    enabled_label = "✅ On" if enabled else "❌ Off"
-    max_pages = _webtoon_val_label(cfg, "webtoon_max_pages", str(WEBTOON_DEFAULT_MAX_PAGES))
-    min_area = _webtoon_val_label(cfg, "webtoon_bubble_min_area", str(WEBTOON_DEFAULT_BUBBLE_MIN_AREA))
-    white_thresh = _webtoon_val_label(cfg, "webtoon_white_thresh", str(WEBTOON_DEFAULT_WHITE_THRESH))
-    pad_px = _webtoon_val_label(cfg, "webtoon_bubble_pad_px", str(WEBTOON_DEFAULT_PAD_PX))
-
-    rows = [
-        [InlineKeyboardButton(f"🧵 Smart Webtoon Stitching: {enabled_label}", callback_data="webtoon_bool_webtoon_enabled")],
-        [InlineKeyboardButton(f"📚 Max Pages Per Batch: {max_pages}", callback_data="webtoon_field_webtoon_max_pages")],
-        [InlineKeyboardButton(f"🫧 Bubble Min Area (px²): {min_area}", callback_data="webtoon_field_webtoon_bubble_min_area")],
-        [InlineKeyboardButton(f"⬜ Bubble White Threshold: {white_thresh}", callback_data="webtoon_field_webtoon_white_thresh")],
-        [InlineKeyboardButton(f"🛡️ Bubble Safety Padding (px): {pad_px}", callback_data="webtoon_field_webtoon_bubble_pad_px")],
-        [InlineKeyboardButton("♻️ Reset All to Original/Default", callback_data="webtoon_reset_all")],
-        [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")],
-    ]
-    return InlineKeyboardMarkup(rows)
-
-def kb_webtoon_bool_select(cfg, field):
-    val = cfg.get(field, True)
-    def mark(v): return "✅ " if val == v else ""
-    rows = [
-        [InlineKeyboardButton(f"{mark(True)}On", callback_data=f"webtoonboolset_{field}_on")],
-        [InlineKeyboardButton(f"{mark(False)}Off", callback_data=f"webtoonboolset_{field}_off")],
-        [InlineKeyboardButton("🔙 Back", callback_data="menu_webtoon")],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -1528,80 +1490,6 @@ async def handle_callbacks(client, query: CallbackQuery):
         )
         return
 
-    if data == "menu_webtoon":
-        await safe_edit(
-            query.message,
-            "🧵 **Smart Webtoon Stitching (Problem No. 3)**\n"
-            "Stitches up to N pages into one continuous 0px-gap strip, runs "
-            "real OpenCV speech-bubble detection on it, and only allows "
-            "tile cuts to land outside every detected bubble — so bubbles "
-            "are never sliced in half.\n\n"
-            "• **Smart Webtoon Stitching**: master on/off switch. When off, "
-            "pages are tiled individually using the older row-flatness-only "
-            "method.\n"
-            "• **Max Pages Per Batch**: how many pages get stitched together "
-            "into one strip before bubble-safe cutting runs. Batches at the "
-            "boundary auto-pull in the start of the next batch if a bubble "
-            "would otherwise be cut across the seam.\n"
-            "• **Bubble Min Area**: blobs smaller than this (in pixels²) are "
-            "ignored as noise, not treated as bubbles.\n"
-            "• **Bubble White Threshold**: how bright (0-255) a pixel must "
-            "be to count as bubble-fill white during detection.\n"
-            "• **Bubble Safety Padding**: extra pixels added around every "
-            "detected bubble box before checking if a cut lands inside it.\n\n"
-            "_\"Original/Default\" = untouched engine defaults._",
-            reply_markup=kb_webtoon_menu(cfg)
-        )
-        return
-
-    if data == "webtoon_bool_webtoon_enabled":
-        await safe_edit(query.message, "🧵 **Smart Webtoon Stitching:**", reply_markup=kb_webtoon_bool_select(cfg, "webtoon_enabled"))
-        return
-
-    if data.startswith("webtoonboolset_"):
-        rest = data[len("webtoonboolset_"):]
-        field, choice = rest.rsplit("_", 1)
-        cfg[field] = (choice == "on")
-        await save_user_config(user_id)
-        await safe_answer(query, "Updated")
-        await safe_edit(query.message, "🧵 **Smart Webtoon Stitching:**", reply_markup=kb_webtoon_bool_select(cfg, field))
-        return
-
-    if data.startswith("webtoon_field_"):
-        field = data.split("webtoon_field_", 1)[1]
-        pretty = {
-            "webtoon_max_pages": "Max Pages Per Batch",
-            "webtoon_bubble_min_area": "Bubble Min Area (px²)",
-            "webtoon_white_thresh": "Bubble White Threshold (0-255)",
-            "webtoon_bubble_pad_px": "Bubble Safety Padding (px)",
-        }.get(field, field)
-        hint = "a whole number, e.g. `10`"
-        if field == "webtoon_white_thresh":
-            hint = "a whole number from 0 to 255, e.g. `235`"
-        awaiting_reply[user_id] = {"type": "webtoon_field", "extra": {"field": field}}
-        await safe_edit(
-            query.message,
-            f"✍️ **Reply to this message with the new {pretty}** ({hint}).\n"
-            f"Reply with `default` to reset to Original/Default."
-        )
-        return
-
-    if data == "webtoon_reset_all":
-        for field in (
-            "webtoon_max_pages", "webtoon_bubble_min_area",
-            "webtoon_white_thresh", "webtoon_bubble_pad_px",
-        ):
-            cfg[field] = None
-        cfg["webtoon_enabled"] = True
-        await save_user_config(user_id)
-        await safe_answer(query, "Webtoon settings reset to Original/Default")
-        await safe_edit(
-            query.message,
-            "🧵 **Smart Webtoon Stitching**\nAll settings reset to Original/Default.",
-            reply_markup=kb_webtoon_menu(cfg)
-        )
-        return
-
     if data == "menu_backup":
         await safe_edit(
             query.message,
@@ -1997,43 +1885,6 @@ async def handle_reply_capture(client, message: Message):
         await message.reply_text(f"✅ {pretty} set to `{value}`.", reply_markup=kb_tiling_menu(cfg))
         return
 
-    if kind == "webtoon_field":
-        field = pending_reply["extra"]["field"]
-        pretty = {
-            "webtoon_max_pages": "Max Pages Per Batch",
-            "webtoon_bubble_min_area": "Bubble Min Area (px²)",
-            "webtoon_white_thresh": "Bubble White Threshold (0-255)",
-            "webtoon_bubble_pad_px": "Bubble Safety Padding (px)",
-        }.get(field, field)
-
-        if text.lower() == "default":
-            cfg[field] = None
-            await save_user_config(user_id)
-            awaiting_reply.pop(user_id, None)
-            await message.reply_text(f"✅ {pretty} reset to Original/Default.", reply_markup=kb_webtoon_menu(cfg))
-            return
-
-        try:
-            value = int(text)
-            if field == "webtoon_white_thresh":
-                if not (0 <= value <= 255):
-                    raise ValueError
-            elif value < 1:
-                raise ValueError
-        except ValueError:
-            if field == "webtoon_white_thresh":
-                hint = "a whole number from 0 to 255 (e.g. `235`)"
-            else:
-                hint = "a positive whole number (e.g. `10`)"
-            await message.reply_text(f"❌ Please reply with {hint}, or `default` to reset. Try again.")
-            return
-
-        cfg[field] = value
-        await save_user_config(user_id)
-        awaiting_reply.pop(user_id, None)
-        await message.reply_text(f"✅ {pretty} set to `{value}`.", reply_markup=kb_webtoon_menu(cfg))
-        return
-
     if kind == "prompt_name":
         prompt_kind = pending_reply["extra"]["kind"]
         if len(text) > PROMPT_NAME_MAX_LEN:
@@ -2133,16 +1984,9 @@ def _stitch_group_vertically(input_dir, base_name, slice_files):
         x_offset = (total_width - im.width) // 2
         stitched.paste(im, (x_offset, y_offset))
         y_offset += im.height
-    out_stem = f"{base_name}__stitched"
-    JPEG_MAX_DIMENSION = 65500
-    if total_height > JPEG_MAX_DIMENSION or total_width > JPEG_MAX_DIMENSION:
-        out_name = f"{out_stem}.png"
-        out_path = os.path.join(input_dir, out_name)
-        stitched.save(out_path)
-    else:
-        out_name = f"{out_stem}.jpg"
-        out_path = os.path.join(input_dir, out_name)
-        stitched.save(out_path, quality=95)
+    out_name = f"{base_name}__stitched.jpg"
+    out_path = os.path.join(input_dir, out_name)
+    stitched.save(out_path, quality=95)
     for im in imgs:
         im.close()
     for f in slice_files:
@@ -2169,7 +2013,6 @@ def stitch_sliced_images(input_dir):
             _stitch_group_vertically(input_dir, base, slice_files)
 
 def flatten_and_order(input_dir, content_type="manhwa", cfg=None):
-    cfg = cfg or {}
     for root, _, files in os.walk(input_dir, topdown=False):
         for f in files:
             if f.lower().endswith(IMAGE_EXTS):
@@ -2191,218 +2034,18 @@ def flatten_and_order(input_dir, content_type="manhwa", cfg=None):
             shutil.move(os.path.join(input_dir, fname), os.path.join(input_dir, new_name))
         ordered_map[idx] = new_name
 
-    webtoon_manifest = None
-    if content_type == "manhwa" and cfg.get("webtoon_enabled", True):
-        ordered_map, webtoon_manifest = aggregate_webtoon_batches(input_dir, ordered_map, cfg=cfg)
-
     tile_manifest = None
     if content_type == "manhwa":
         tile_manifest = tile_tall_pages(input_dir, ordered_map, cfg=cfg)
 
     return ordered_map, tile_manifest
 
-# ================= Webtoon Aggregation (Problem No. 3, items 3 & 4) =================
-def aggregate_webtoon_batches(input_dir, ordered_map, cfg=None):
-    """Vertically stitch pages into batches of up to N pages (default 10)
-    using strict 0px gap/margin/padding logic (item 3), with boundary
-    overlap correction (item 4): if a bubble sits right at the batch
-    boundary and would be cut in half, the remaining portion is pulled in
-    from the first page of the next batch before the seam is finalized, so
-    detection never sees a bubble sliced across a batch join.
-
-    Returns (new_ordered_map, manifest) where manifest maps the new page
-    index -> {"source_pages": [...], "batch_heights": [...], "width": w,
-    "boundary_pulled_px": N} describing how each stitched page was built,
-    so downstream code (e.g. a future un-stitch step) has what it needs.
-    """
-    from PIL import Image
-
-    cfg = cfg or {}
-    max_pages = cfg.get("webtoon_max_pages") or WEBTOON_DEFAULT_MAX_PAGES
-    if max_pages < 1:
-        max_pages = 1
-
-    fnames = [ordered_map[idx] for idx in sorted(ordered_map.keys())]
-    if len(fnames) <= 1:
-        return ordered_map, {}
-
-    batches = [fnames[i:i + max_pages] for i in range(0, len(fnames), max_pages)]
-
-    new_ordered_map = {}
-    manifest = {}
-    new_idx = 1
-
-    for batch_i, batch_files in enumerate(batches):
-        imgs = []
-        for f in batch_files:
-            p = os.path.join(input_dir, f)
-            if os.path.exists(p):
-                imgs.append(Image.open(p).convert("RGB"))
-        if not imgs:
-            continue
-
-        width = max(im.width for im in imgs)
-        # 0px gap: total height is the exact sum of page heights, no padding
-        # between pages, no extra margins top/bottom.
-        total_height = sum(im.height for im in imgs)
-
-        boundary_pulled_px = 0
-        next_batch_first_img = None
-        next_batch_first_fname = None
-        if batch_i + 1 < len(batches) and batches[batch_i + 1]:
-            next_fname = batches[batch_i + 1][0]
-            next_path = os.path.join(input_dir, next_fname)
-            if os.path.exists(next_path):
-                next_batch_first_fname = next_fname
-                next_batch_first_img = Image.open(next_path).convert("RGB")
-
-        # Boundary Overlap Correction (item 4): check whether a bubble sits
-        # right at the very bottom edge of this batch (i.e. touches the last
-        # row of the stitched strip). If so, and a next batch/page exists,
-        # pull in enough of the next page's top to complete that bubble.
-        extra_bottom_px = 0
-        if next_batch_first_img is not None:
-            try:
-                boundary_boxes = detect_bubble_boxes_cv2(imgs[-1])
-                last_tile_h = imgs[-1].height
-                touches_bottom = any((by + bh) >= last_tile_h - 2 for (bx, by, bw, bh) in boundary_boxes)
-                if touches_bottom:
-                    # Look at the top of the next page for a bubble that
-                    # touches ITS top edge -- that's the other half of the
-                    # same bubble continuing across the boundary.
-                    next_boxes = detect_bubble_boxes_cv2(next_batch_first_img)
-                    top_touching = [by + bh for (bx, by, bw, bh) in next_boxes if by <= 2]
-                    if top_touching:
-                        extra_bottom_px = min(max(top_touching), next_batch_first_img.height)
-            except Exception:
-                extra_bottom_px = 0
-
-        stitched = Image.new("RGB", (width, total_height + extra_bottom_px), (255, 255, 255))
-        y_offset = 0
-        batch_heights = []
-        for im in imgs:
-            x_offset = 0  # strict 0px gap: no horizontal centering offset either
-            stitched.paste(im, (x_offset, y_offset))
-            y_offset += im.height
-            batch_heights.append(im.height)
-
-        if extra_bottom_px > 0 and next_batch_first_img is not None:
-            pulled_region = next_batch_first_img.crop((0, 0, width, extra_bottom_px))
-            stitched.paste(pulled_region, (0, y_offset))
-            boundary_pulled_px = extra_bottom_px
-
-        out_stem = f"webtoon_batch_{new_idx:03d}"
-        final_height = total_height + extra_bottom_px
-        # JPEG has a hard 65500px per-dimension limit (libjpeg encodes width/
-        # height in a 16-bit field). Stitching up to `webtoon_max_pages` full
-        # manhwa pages together (each often 3000-15000px tall) can easily
-        # exceed that, and PIL raises exactly "OSError: broken data stream
-        # when writing image file" if you try to save an oversized strip as
-        # .jpg. PNG has no such limit, so use it whenever the strip is too
-        # tall for JPEG to encode safely.
-        JPEG_MAX_DIMENSION = 65500
-        if final_height > JPEG_MAX_DIMENSION or width > JPEG_MAX_DIMENSION:
-            out_name = f"{out_stem}.png"
-            out_path = os.path.join(input_dir, out_name)
-            stitched.save(out_path)
-        else:
-            out_name = f"{out_stem}.jpg"
-            out_path = os.path.join(input_dir, out_name)
-            stitched.save(out_path, quality=95)
-
-        for im in imgs:
-            im.close()
-        if next_batch_first_img is not None:
-            next_batch_first_img.close()
-        for f in batch_files:
-            try:
-                os.remove(os.path.join(input_dir, f))
-            except Exception:
-                pass
-
-        new_ordered_map[new_idx] = out_name
-        manifest[new_idx] = {
-            "source_pages": batch_files,
-            "batch_heights": batch_heights,
-            "width": width,
-            "boundary_pulled_px": boundary_pulled_px,
-            "boundary_source_page": next_batch_first_fname if boundary_pulled_px else None,
-        }
-        new_idx += 1
-
-    return new_ordered_map, manifest
-
-
+# ================= Long-Strip Tiling (Manhwa) =================
 def _compute_row_flatness(im):
     import numpy as np
     gray = im.convert("L")
     arr = np.asarray(gray, dtype=np.float32)
     return arr.std(axis=1)
-
-# ---- Problem No. 2 fix: skip tiles that contain no text/speech bubbles ----
-# Speech bubbles + text create sharp, high-contrast edges in a fairly tight
-# cluster (bubble outline + glyph strokes). Pure art/background/face tiles
-# still have edges (line art, shading) but they're either much sparser or
-# spread evenly across the whole tile with no dense small-scale cluster.
-# We use a cheap gradient-based heuristic (no OpenCV/OCR dependency) that
-# looks for a patch of the tile with unusually dense high-frequency detail,
-# which is what text glyphs and bubble borders reliably produce.
-TILE_TEXT_MIN_EDGE_DENSITY = 0.015   # fraction of "high gradient" pixels needed
-TILE_TEXT_MIN_HOTSPOT_FRAC = 0.006   # fraction of pixels in the densest patch
-
-def tile_has_probable_text(im, grid=16):
-    """Heuristic check: does this tile likely contain text/speech-bubble content?
-
-    Returns True if the tile probably has text (safe default -- when unsure,
-    treat it as having text so we still send it to translation rather than
-    risk silently dropping real content). Returns False only when the tile
-    looks like flat art/background/face with no localized high-detail patch.
-    """
-    import numpy as np
-    try:
-        gray = im.convert("L")
-        w, h = gray.size
-        if max(w, h) > 800:
-            scale = 800 / max(w, h)
-            gray = gray.resize((max(1, int(w * scale)), max(1, int(h * scale))))
-        arr = np.asarray(gray, dtype=np.float32)
-        if arr.size == 0:
-            return True
-
-        gx = np.abs(np.diff(arr, axis=1))
-        gy = np.abs(np.diff(arr, axis=0))
-        gx = np.pad(gx, ((0, 0), (0, 1)))
-        gy = np.pad(gy, ((0, 1), (0, 0)))
-        grad = gx + gy
-
-        edge_thresh = 40.0
-        high_grad_mask = grad > edge_thresh
-        overall_density = high_grad_mask.mean()
-
-        gh, gw = arr.shape
-        rows = np.array_split(np.arange(gh), min(grid, max(gh, 1)))
-        cols = np.array_split(np.arange(gw), min(grid, max(gw, 1)))
-        max_cell_density = 0.0
-        for r in rows:
-            if len(r) == 0:
-                continue
-            for c in cols:
-                if len(c) == 0:
-                    continue
-                cell = high_grad_mask[r[0]:r[-1] + 1, c[0]:c[-1] + 1]
-                if cell.size == 0:
-                    continue
-                d = cell.mean()
-                if d > max_cell_density:
-                    max_cell_density = d
-
-        if overall_density >= TILE_TEXT_MIN_EDGE_DENSITY:
-            return True
-        if max_cell_density >= (TILE_TEXT_MIN_HOTSPOT_FRAC * grid):
-            return True
-        return False
-    except Exception:
-        return True
 
 def _find_safe_cut_row(row_flatness, target_y, search_window, min_y, max_y, flat_threshold=MANHWA_SAFE_CUT_FLAT_THRESHOLD):
     if row_flatness[target_y] < flat_threshold:
@@ -2415,179 +2058,6 @@ def _find_safe_cut_row(row_flatness, target_y, search_window, min_y, max_y, flat
         if up >= min_y and row_flatness[up] < flat_threshold:
             return up
     return None  
-
-# ================= Problem No. 3: Smart Bubble-Avoidance Slicing =================
-# Real OpenCV-based bubble detection, used to build a "no-cut zone" mask so the
-# webtoon strip is never sliced through a speech bubble.
-
-WEBTOON_DEFAULT_MAX_PAGES = 10
-WEBTOON_DEFAULT_BUBBLE_MIN_AREA = 900        # px^2, filters out tiny noise blobs
-WEBTOON_DEFAULT_BUBBLE_MAX_AREA_FRAC = 0.35  # ignore blobs covering most of the strip (false positive)
-WEBTOON_DEFAULT_WHITE_THRESH = 235           # grayscale value above which a pixel counts as "bubble-white"
-WEBTOON_DEFAULT_PAD_PX = 12                  # safety padding added around every detected bubble box
-
-def detect_bubble_boxes_cv2(pil_image, min_area=None, max_area_frac=None, white_thresh=None, pad_px=None):
-    """Concrete, image-processing-based speech-bubble detector using OpenCV.
-
-    Approach:
-    1. Convert to grayscale and binarize so bright, mostly-white regions
-       (typical manga/manhwa bubble fill) separate from line art / background.
-    2. Run cv2.findContours on the binary mask to get candidate blobs.
-    3. Filter blobs by area and by shape (bubbles are compact/convex-ish;
-       page-wide flat-white gutters get rejected by the max-area-fraction
-       and aspect-ratio checks below).
-    4. Also run connectedComponentsWithStats as a second, independent pass
-       and union its boxes in -- this catches thin/irregular bubbles that
-       findContours' polygon simplification can sometimes merge or miss.
-
-    Returns a list of (x, y, w, h) bounding boxes in image-pixel coordinates,
-    already padded by pad_px and merged where overlapping.
-    """
-    import cv2
-    import numpy as np
-
-    min_area = WEBTOON_DEFAULT_BUBBLE_MIN_AREA if min_area is None else min_area
-    max_area_frac = WEBTOON_DEFAULT_BUBBLE_MAX_AREA_FRAC if max_area_frac is None else max_area_frac
-    white_thresh = WEBTOON_DEFAULT_WHITE_THRESH if white_thresh is None else white_thresh
-    pad_px = WEBTOON_DEFAULT_PAD_PX if pad_px is None else pad_px
-
-    arr = np.array(pil_image.convert("L"))
-    h, w = arr.shape
-    page_area = h * w
-
-    # Binary mask: bright/white regions (bubble fill) become foreground.
-    _, binary = cv2.threshold(arr, white_thresh, 255, cv2.THRESH_BINARY)
-
-    # Close small gaps in bubble borders (dashed/anti-aliased outlines) so the
-    # bubble reads as one solid connected blob instead of fragments.
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-    boxes = []
-
-    # --- Pass 1: contour-based detection ---
-    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < min_area or area > page_area * max_area_frac:
-            continue
-        x, y, bw, bh = cv2.boundingRect(cnt)
-        # Reject extremely thin slivers spanning the full width (these are
-        # almost always blank gutter strips between panels, not bubbles).
-        if bw >= w * 0.98 and bh < 40:
-            continue
-        boxes.append((x, y, bw, bh))
-
-    # --- Pass 2: connected-components pass (catches irregular/thin bubbles) ---
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(closed, connectivity=8)
-    for i in range(1, num_labels):  # label 0 is background
-        area = stats[i, cv2.CC_STAT_AREA]
-        if area < min_area or area > page_area * max_area_frac:
-            continue
-        x = stats[i, cv2.CC_STAT_LEFT]
-        y = stats[i, cv2.CC_STAT_TOP]
-        bw = stats[i, cv2.CC_STAT_WIDTH]
-        bh = stats[i, cv2.CC_STAT_HEIGHT]
-        if bw >= w * 0.98 and bh < 40:
-            continue
-        boxes.append((x, y, bw, bh))
-
-    if not boxes:
-        return []
-
-    # Pad each box for safety margin, then merge overlapping/adjacent boxes
-    # so a bubble found by both passes (or split across passes) becomes one
-    # no-cut zone instead of two overlapping ones.
-    padded = []
-    for (x, y, bw, bh) in boxes:
-        nx = max(0, x - pad_px)
-        ny = max(0, y - pad_px)
-        nx2 = min(w, x + bw + pad_px)
-        ny2 = min(h, y + bh + pad_px)
-        padded.append([nx, ny, nx2, ny2])
-
-    merged = _merge_boxes(padded)
-    return [(x1, y1, x2 - x1, y2 - y1) for (x1, y1, x2, y2) in merged]
-
-def _merge_boxes(boxes_xyxy):
-    """Merge overlapping/touching (x1,y1,x2,y2) boxes via union-find."""
-    n = len(boxes_xyxy)
-    if n == 0:
-        return []
-    parent = list(range(n))
-
-    def find(i):
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    def union(i, j):
-        ri, rj = find(i), find(j)
-        if ri != rj:
-            parent[ri] = rj
-
-    def overlaps(a, b):
-        ax1, ay1, ax2, ay2 = a
-        bx1, by1, bx2, by2 = b
-        return not (ax2 < bx1 or bx2 < ax1 or ay2 < by1 or by2 < ay1)
-
-    for i in range(n):
-        for j in range(i + 1, n):
-            if overlaps(boxes_xyxy[i], boxes_xyxy[j]):
-                union(i, j)
-
-    groups = {}
-    for i in range(n):
-        r = find(i)
-        groups.setdefault(r, []).append(boxes_xyxy[i])
-
-    result = []
-    for group in groups.values():
-        x1 = min(b[0] for b in group)
-        y1 = min(b[1] for b in group)
-        x2 = max(b[2] for b in group)
-        y2 = max(b[3] for b in group)
-        result.append((x1, y1, x2, y2))
-    return result
-
-def merge_bubble_boxes_with_ocr(bubble_boxes, ocr_boxes):
-    """Merge OpenCV-detected bubble boxes with OCR text boxes (if the caller
-    already has them from a prior detection pass) into one unified no-cut
-    mask. ocr_boxes should be an iterable of (x, y, w, h) in the same pixel
-    space as bubble_boxes. Safe to call with ocr_boxes=None/[] when no OCR
-    boxes are available yet -- in that case this just returns bubble_boxes
-    merged with themselves (a no-op union).
-    """
-    ocr_boxes = ocr_boxes or []
-    combined_xyxy = [(x, y, x + w, y + h) for (x, y, w, h) in list(bubble_boxes) + list(ocr_boxes)]
-    merged = _merge_boxes(combined_xyxy)
-    return [(x1, y1, x2 - x1, y2 - y1) for (x1, y1, x2, y2) in merged]
-
-def find_safe_cut_row_avoiding_bubbles(no_cut_boxes, target_y, search_window, min_y, max_y):
-    """Smart cut-point calculation (item 2): if target_y falls inside any
-    detected bubble/text box, walk outward (up and down symmetrically) to
-    the nearest row that is not inside ANY no-cut box. Returns None if no
-    safe row is found within search_window, so the caller can widen the
-    search or fall back to the trigger-height cap.
-    """
-    def inside_any_box(y):
-        for (bx, by, bw, bh) in no_cut_boxes:
-            if by <= y <= by + bh:
-                return True
-        return False
-
-    if not inside_any_box(target_y) and min_y <= target_y <= max_y:
-        return target_y
-
-    for delta in range(1, search_window + 1):
-        down = target_y + delta
-        up = target_y - delta
-        if down <= max_y and not inside_any_box(down):
-            return down
-        if up >= min_y and not inside_any_box(up):
-            return up
-    return None
 
 def tile_tall_pages(input_dir, ordered_map, cfg=None):
     from PIL import Image
@@ -2630,34 +2100,8 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
             row_flatness = _compute_row_flatness(im)
             search_window = tile_search_radius  
 
-            # Smart Bubble-Avoidance Slicing (Problem No. 3): when Smart Webtoon
-            # Stitching is enabled, run real OpenCV bubble detection once per
-            # page and use the resulting no-cut zones as the primary safety
-            # check, ahead of the row-flatness heuristic. A cut is only
-            # accepted if it lands outside every detected bubble box.
-            webtoon_enabled = cfg.get("webtoon_enabled", True)
-            no_cut_boxes = []
-            if webtoon_enabled:
-                try:
-                    bubble_min_area = cfg.get("webtoon_bubble_min_area") or WEBTOON_DEFAULT_BUBBLE_MIN_AREA
-                    bubble_white_thresh = cfg.get("webtoon_white_thresh") or WEBTOON_DEFAULT_WHITE_THRESH
-                    bubble_pad_px = cfg.get("webtoon_bubble_pad_px")
-                    bubble_pad_px = WEBTOON_DEFAULT_PAD_PX if bubble_pad_px is None else bubble_pad_px
-                    no_cut_boxes = detect_bubble_boxes_cv2(
-                        im,
-                        min_area=bubble_min_area,
-                        white_thresh=bubble_white_thresh,
-                        pad_px=bubble_pad_px,
-                    )
-                except Exception:
-                    # OpenCV detection failing (corrupt image, decode error, etc.)
-                    # should never crash the whole tiling pass — fall back to the
-                    # existing row-flatness-only behavior for this page.
-                    no_cut_boxes = []
-
             tile_files = []
             tile_heights = []
-            tile_has_text = []  # per-tile heuristic: does this tile probably contain text/bubbles?
             forced_cut_rows = []  # cuts that landed on non-flat (likely mid-art/mid-bubble) rows
             y = 0
             tile_n = 0
@@ -2673,23 +2117,7 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
                     cut = height
                     was_forced = False
                 else:
-                    if no_cut_boxes:
-                        # Primary check: never land inside a detected bubble box.
-                        cut = find_safe_cut_row_avoiding_bubbles(no_cut_boxes, target_bottom, search_window, y + 1, height - 1)
-                    else:
-                        cut = None
-                    if cut is None:
-                        # Either no bubble boxes were found, or bubble-avoidance
-                        # couldn't find a safe row nearby — fall back to the
-                        # existing row-flatness (blank-row) heuristic, still
-                        # re-checked against no_cut_boxes so we don't undo the
-                        # bubble-safety guarantee.
-                        cut = _find_safe_cut_row(row_flatness, target_bottom, search_window, y + 1, height - 1, tile_flat_threshold)
-                        if cut is not None and no_cut_boxes:
-                            for (bx, by, bw, bh) in no_cut_boxes:
-                                if by <= cut <= by + bh:
-                                    cut = None
-                                    break
+                    cut = _find_safe_cut_row(row_flatness, target_bottom, search_window, y + 1, height - 1, tile_flat_threshold)
                     was_forced = cut is None
                     extended_target = target_bottom
                     attempts = 0
@@ -2700,21 +2128,11 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
                             cut = height
                             was_forced = False  # cutting at the true bottom of the strip is fine
                             break
-                        if no_cut_boxes:
-                            cut = find_safe_cut_row_avoiding_bubbles(no_cut_boxes, extended_target, search_window, y + 1, height - 1)
-                        else:
-                            cut = None
-                        if cut is None:
-                            cut = _find_safe_cut_row(row_flatness, extended_target, search_window, y + 1, height - 1, tile_flat_threshold)
-                            if cut is not None and no_cut_boxes:
-                                for (bx, by, bw, bh) in no_cut_boxes:
-                                    if by <= cut <= by + bh:
-                                        cut = None
-                                        break
+                        cut = _find_safe_cut_row(row_flatness, extended_target, search_window, y + 1, height - 1, tile_flat_threshold)
                         if cut is not None:
                             was_forced = False
                     if cut is None:
-                        # Never found a safe row even after widening the search — fall back to
+                        # Never found a flat row even after widening the search — fall back to
                         # the original target and flag it, since this cut may slice through
                         # a bubble/panel and cause duplicated or clipped content at the seam.
                         cut = target_bottom
@@ -2737,26 +2155,10 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
                     was_forced = False
 
                 tile = im.crop((0, y, width, cut))
-                tile_stem = f"{os.path.splitext(fname)[0]}_tile{tile_n:03d}"
-                # Same libjpeg 65500px-per-side limit as the stitching stages.
-                # A tile's height is bounded by tile_height, but its WIDTH is
-                # inherited unchanged from the source page (which, after
-                # webtoon aggregation, can be the max width across up to 10
-                # stitched pages, or simply an unusually wide scan/spread).
-                # Guard both dimensions, not just height, or PIL raises
-                # "broken data stream when writing image file" mid-encode.
-                JPEG_MAX_DIMENSION = 65500
-                if tile.width > JPEG_MAX_DIMENSION or tile.height > JPEG_MAX_DIMENSION:
-                    tile_name = f"{tile_stem}.png"
-                    tile_path = os.path.join(input_dir, tile_name)
-                    tile.save(tile_path)
-                else:
-                    tile_name = f"{tile_stem}.jpg"
-                    tile_path = os.path.join(input_dir, tile_name)
-                    tile.save(tile_path, quality=95)
+                tile_name = f"{os.path.splitext(fname)[0]}_tile{tile_n:03d}.jpg"
+                tile.save(os.path.join(input_dir, tile_name), quality=95)
                 tile_files.append(tile_name)
                 tile_heights.append(cut - y)
-                tile_has_text.append(tile_has_probable_text(tile))
                 tile_n += 1
                 if cut < height:
                     cuts_made += 1
@@ -2773,7 +2175,6 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
             manifest[idx] = {
                 "tiles": tile_files,
                 "heights": tile_heights,
-                "has_text": tile_has_text,
                 "width": width,
                 "original_height": height,
                 "original_name": fname,
@@ -2782,51 +2183,6 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
             }
         os.remove(path)  
     return manifest
-
-def split_out_textless_tiles(input_dir, tile_manifest):
-    """Problem No. 2 fix, step 1: pull tiles with no detected text OUT of
-    input_dir before the translation engine ever sees them, so the engine
-    never gets a blank/textless tile to choke on in the first place.
-
-    Moved-out tiles are kept in a sibling `_skip_tiles` folder so they can be
-    copied straight into the translated output later (untouched, as
-    required) without re-running detection or touching the engine's output.
-    Returns the path to that skip folder (created even if empty).
-    """
-    skip_dir = os.path.join(
-        os.path.dirname(input_dir.rstrip(os.sep)),
-        os.path.basename(input_dir.rstrip(os.sep)) + "_skip_tiles",
-    )
-    os.makedirs(skip_dir, exist_ok=True)
-    for manifest_entry in tile_manifest.values():
-        tiles = manifest_entry.get("tiles", [])
-        has_text_flags = manifest_entry.get("has_text", [])
-        for i, tile_name in enumerate(tiles):
-            has_text = has_text_flags[i] if i < len(has_text_flags) else True
-            if has_text:
-                continue  # keep it in input_dir, it needs real translation
-            src = os.path.join(input_dir, tile_name)
-            if os.path.exists(src):
-                shutil.move(src, os.path.join(skip_dir, tile_name))
-    return skip_dir
-
-def restore_skipped_tiles(file_translated_dir, skip_dir):
-    """Problem No. 2 fix, step 2: after the engine runs, copy every
-    textless tile that was withheld straight into the translated output
-    folder, completely untouched. From the recompose step's point of view
-    these tiles were "successfully processed" -- there is nothing to
-    translate, so passing them through as-is IS success, not a failure.
-    """
-    if not os.path.isdir(skip_dir):
-        return
-    for tile_name in os.listdir(skip_dir):
-        src = os.path.join(skip_dir, tile_name)
-        if not os.path.isfile(src):
-            continue
-        dst = os.path.join(file_translated_dir, tile_name)
-        if not os.path.exists(dst):
-            shutil.copy2(src, dst)
-    shutil.rmtree(skip_dir, ignore_errors=True)
 
 SEAM_CHECK_BAND_PX = 40
 SEAM_DUPLICATE_DIFF_THRESHOLD = 6.0
@@ -2847,7 +2203,7 @@ def _seam_looks_duplicated(recomposed_im, seam_y, band_px=SEAM_CHECK_BAND_PX, di
     diff = np.abs(upper_band - lower_band).mean()
     return diff < diff_threshold
 
-def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None, input_dir=None):
+def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None, source_dir=None):
     from PIL import Image
     cfg = cfg or {}
     seam_band_px = cfg.get("tile_seam_band_px") or SEAM_CHECK_BAND_PX
@@ -2860,7 +2216,8 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None, inp
     forced_cut_rows = set(manifest_entry.get("forced_cut_rows", []))
 
     translated_tile_paths = []
-    for tile_name in tiles:
+    untranslated_tile_indices = []
+    for i, tile_name in enumerate(tiles):
         stem = os.path.splitext(tile_name)[0]
         found = None
         for ext in IMAGE_EXTS:
@@ -2869,28 +2226,18 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None, inp
                 found = candidate
                 break
         if found is None:
-            # Exception-handling fallback: the engine didn't produce output for
-            # this tile (e.g. it silently failed on a tile we *thought* had
-            # text). Rather than fail the whole page, fall back to the
-            # original untranslated tile crop if we still have it, so the
-            # page stays complete. Only give up and return None if we truly
-            # have nothing to place here.
-            fallback = None
-            if input_dir:
-                candidate = os.path.join(input_dir, tile_name)
-                if os.path.exists(candidate):
-                    fallback = candidate
-            if fallback is None:
+            if source_dir is not None:
+                src_candidate = os.path.join(source_dir, tile_name)
+                if os.path.exists(src_candidate):
+                    found = src_candidate
+                    untranslated_tile_indices.append(i)
+            if found is None:
                 return None
-            found = fallback
         translated_tile_paths.append(found)
 
     recomposed = Image.new("RGB", (width, total_height), (255, 255, 255))
     seam_ys = []  
     y_cursor = 0
-    # 0px Gap Re-assembly (item 5): tiles are pasted back at the exact
-    # cumulative y-offset with no padding/margin/offset between them, so the
-    # recomposed page/webtoon strip has no visible seam gaps.
     for i, tile_path in enumerate(translated_tile_paths):
         with Image.open(tile_path) as tile_im:
             tile_im = tile_im.convert("RGB")
@@ -2913,33 +2260,16 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None, inp
             flagged_seams.append(seam_y)
 
     out_name = manifest_entry["original_name"]
-    out_stem, out_ext = os.path.splitext(out_name)
-    JPEG_MAX_DIMENSION = 65500
-    # Same libjpeg 65500px-per-side limit as the stitching stages: a
-    # recomposed webtoon-batch page can be taller than that, so force PNG
-    # (no dimension limit) instead of letting PIL raise "broken data stream
-    # when writing image file" mid-encode.
-    if recomposed.height > JPEG_MAX_DIMENSION or recomposed.width > JPEG_MAX_DIMENSION:
-        out_name = f"{out_stem}.png"
-        out_path = os.path.join(translated_dir, out_name)
-        recomposed.save(out_path)
-    else:
-        out_name = f"{out_stem}{out_ext if out_ext.lower() in ('.jpg', '.jpeg') else '.jpg'}"
-        out_path = os.path.join(translated_dir, out_name)
-        recomposed.save(out_path, quality=95)
-    for p in translated_tile_paths:
-        # Only clean up tiles that live in translated_dir (the engine's output
-        # or a restored textless tile). Never remove a fallback tile that was
-        # read from input_dir -- that whole job folder is wiped separately,
-        # and deleting it here would be reaching outside this function's
-        # intended scope.
-        if os.path.dirname(os.path.abspath(p)) != os.path.abspath(translated_dir):
-            continue
+    out_path = os.path.join(translated_dir, out_name)
+    recomposed.save(out_path, quality=95)
+    for i, p in enumerate(translated_tile_paths):
+        if i in untranslated_tile_indices:
+            continue  # this came from source_dir (original tile), not a temp output — keep it
         try:
             os.remove(p)
         except Exception:
             pass
-    return (out_path, flagged_seams)
+    return (out_path, flagged_seams, untranslated_tile_indices)
 
 def build_dynamic_system_instruction(cfg):
     system_text = cfg["system_prompt_text"].replace("{target_lang}", cfg["target_lang"])
@@ -3106,23 +2436,13 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             await safe_edit(status_msg, f"⚠️ File {file_idx}/{total_files}: no valid images found, skipping.")
             continue
 
-        skip_tiles_dir = None
         if tile_manifest:
             tiled_pages = len(tile_manifest)
             total_tiles = sum(len(v["tiles"]) for v in tile_manifest.values())
-            skipped_tiles = sum(
-                1 for v in tile_manifest.values() for has_text in v.get("has_text", []) if not has_text
-            )
-            status_line = f"✂️ Tiling {tiled_pages} tall page(s) into {total_tiles} tile(s) for detection"
-            if skipped_tiles:
-                status_line += f" ({skipped_tiles} textless tile(s) will be passed through untranslated)"
             await safe_edit(
                 status_msg,
-                build_status_text(mode_label, status_line, file_idx, total_files, 0, total_images, 20)
+                build_status_text(mode_label, f"✂️ Tiling {tiled_pages} tall page(s) into {total_tiles} tile(s) for detection", file_idx, total_files, 0, total_images, 20)
             )
-            # Problem No. 2 fix: pull textless/blank tiles out of input_dir so the
-            # translation engine never receives them and can't fail/error on them.
-            skip_tiles_dir = split_out_textless_tiles(input_dir, tile_manifest)
             total_images = len([f for f in os.listdir(input_dir) if f.lower().endswith(IMAGE_EXTS)])
 
         dynamic_system_instruction = build_dynamic_system_instruction(cfg)
@@ -3249,29 +2569,31 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             continue
 
         if tile_manifest:
-            # Problem No. 2 fix: bring back the textless tiles we withheld from the
-            # engine, untouched, so recompose sees a complete set of tile files —
-            # a skipped tile is a success, not a gap.
-            if skip_tiles_dir:
-                restore_skipped_tiles(file_translated_dir, skip_tiles_dir)
-
             await safe_edit(status_msg, build_status_text(mode_label, "🧵 Recomposing tiled pages", file_idx, total_files, total_images, total_images, 85))
             recompose_failures = []
             duplicate_suspected_pages = []
+            notext_tile_pages = 0
             for page_idx, manifest_entry in tile_manifest.items():
-                result = recompose_tiled_page(file_translated_dir, page_idx, manifest_entry, cfg=cfg, input_dir=input_dir)
+                result = recompose_tiled_page(file_translated_dir, page_idx, manifest_entry, cfg=cfg, source_dir=input_dir)
                 if result is None:
+                    # Genuine failure: no translated output AND no original source
+                    # tile to fall back to (e.g. the file was deleted/moved).
                     recompose_failures.append(page_idx)
                     continue
-                result_path, flagged_seams = result
+                result_path, flagged_seams, untranslated_tile_indices = result
+                if untranslated_tile_indices:
+                    # One or more tiles had no bubble/text for the engine to
+                    # translate, so their original art was kept as-is. This is
+                    # expected/normal, not an error - don't alarm the user.
+                    notext_tile_pages += 1
                 if flagged_seams:
                     duplicate_suspected_pages.append(page_idx)
             if recompose_failures:
                 await safe_edit(
                     status_msg,
                     f"⚠️ File {file_idx}/{total_files}: {len(recompose_failures)} tiled page(s) "
-                    f"had a tile that failed to translate and had no original tile to fall back "
-                    f"to, so those pages may be incomplete. Continuing with the rest."
+                    f"had a tile that failed to translate, so those pages may be incomplete. "
+                    f"Continuing with the rest."
                 )
             if duplicate_suspected_pages:
                 pages_list = ", ".join(str(p) for p in duplicate_suspected_pages)

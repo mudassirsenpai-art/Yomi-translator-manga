@@ -2203,7 +2203,7 @@ def _seam_looks_duplicated(recomposed_im, seam_y, band_px=SEAM_CHECK_BAND_PX, di
     diff = np.abs(upper_band - lower_band).mean()
     return diff < diff_threshold
 
-def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None, source_dir=None):
+def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None):
     from PIL import Image
     cfg = cfg or {}
     seam_band_px = cfg.get("tile_seam_band_px") or SEAM_CHECK_BAND_PX
@@ -2216,8 +2216,7 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None, sou
     forced_cut_rows = set(manifest_entry.get("forced_cut_rows", []))
 
     translated_tile_paths = []
-    untranslated_tile_indices = []
-    for i, tile_name in enumerate(tiles):
+    for tile_name in tiles:
         stem = os.path.splitext(tile_name)[0]
         found = None
         for ext in IMAGE_EXTS:
@@ -2226,13 +2225,7 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None, sou
                 found = candidate
                 break
         if found is None:
-            if source_dir is not None:
-                src_candidate = os.path.join(source_dir, tile_name)
-                if os.path.exists(src_candidate):
-                    found = src_candidate
-                    untranslated_tile_indices.append(i)
-            if found is None:
-                return None
+            return None  
         translated_tile_paths.append(found)
 
     recomposed = Image.new("RGB", (width, total_height), (255, 255, 255))
@@ -2262,14 +2255,12 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None, sou
     out_name = manifest_entry["original_name"]
     out_path = os.path.join(translated_dir, out_name)
     recomposed.save(out_path, quality=95)
-    for i, p in enumerate(translated_tile_paths):
-        if i in untranslated_tile_indices:
-            continue  # this came from source_dir (original tile), not a temp output — keep it
+    for p in translated_tile_paths:
         try:
             os.remove(p)
         except Exception:
             pass
-    return (out_path, flagged_seams, untranslated_tile_indices)
+    return (out_path, flagged_seams)
 
 def build_dynamic_system_instruction(cfg):
     system_text = cfg["system_prompt_text"].replace("{target_lang}", cfg["target_lang"])
@@ -2539,39 +2530,13 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             print(stderr_text)
 
             if process.returncode != 0:
-                partial_produced = []
-                if os.path.exists(file_translated_dir):
-                    partial_produced = [f for f in os.listdir(file_translated_dir) if f.lower().endswith(IMAGE_EXTS)]
-
-                if not partial_produced:
-                    # Nothing came out at all - this is a genuine hard failure.
-                    tail = (stderr_text.strip() or stdout_text.strip() or "no output captured")[-800:]
-                    await safe_edit(
-                        status_msg,
-                        f"❌ **Engine exited with error on file {file_idx}/{total_files}** (code {process.returncode}):\n```\n{tail}\n```"
-                    )
-                    active_jobs.pop(user_id, None)
-                    return
-
-                # Partial success: some tiles/pages translated fine, but the engine
-                # exited non-zero because one or more individual images/tiles
-                # couldn't be translated (e.g. a bubble batch the LLM refused or
-                # garbled). Don't throw away the successful pages - warn and continue.
-                failed_note = ""
-                m = re.search(r"Failed:\s*(\d+)\s*images?", stdout_text)
-                if m:
-                    failed_note = f" ({m.group(1)} image(s) failed)"
-                fail_lines = re.findall(r"^\s*-\s*(\S+):\s*(.+)$", stdout_text, re.MULTILINE)
-                fail_detail = ""
-                if fail_lines:
-                    shown = fail_lines[:5]
-                    fail_detail = "\n" + "\n".join(f"• `{name}` — {reason}" for name, reason in shown)
+                tail = (stderr_text.strip() or stdout_text.strip() or "no output captured")[-800:]
                 await safe_edit(
                     status_msg,
-                    f"⚠️ File {file_idx}/{total_files}: engine reported errors{failed_note}, "
-                    f"but {len(partial_produced)} image(s) translated successfully. "
-                    f"Continuing with the rest; failed page(s) may be missing or untranslated.{fail_detail}"
+                    f"❌ **Engine exited with error on file {file_idx}/{total_files}** (code {process.returncode}):\n```\n{tail}\n```"
                 )
+                active_jobs.pop(user_id, None)
+                return
         except Exception as exec_err:
             await safe_edit(status_msg, f"❌ Engine error on file {file_idx}/{total_files}: {exec_err}")
             active_jobs.pop(user_id, None)
@@ -2598,20 +2563,12 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             await safe_edit(status_msg, build_status_text(mode_label, "🧵 Recomposing tiled pages", file_idx, total_files, total_images, total_images, 85))
             recompose_failures = []
             duplicate_suspected_pages = []
-            notext_tile_pages = 0
             for page_idx, manifest_entry in tile_manifest.items():
-                result = recompose_tiled_page(file_translated_dir, page_idx, manifest_entry, cfg=cfg, source_dir=input_dir)
+                result = recompose_tiled_page(file_translated_dir, page_idx, manifest_entry, cfg=cfg)
                 if result is None:
-                    # Genuine failure: no translated output AND no original source
-                    # tile to fall back to (e.g. the file was deleted/moved).
                     recompose_failures.append(page_idx)
                     continue
-                result_path, flagged_seams, untranslated_tile_indices = result
-                if untranslated_tile_indices:
-                    # One or more tiles had no bubble/text for the engine to
-                    # translate, so their original art was kept as-is. This is
-                    # expected/normal, not an error - don't alarm the user.
-                    notext_tile_pages += 1
+                result_path, flagged_seams = result
                 if flagged_seams:
                     duplicate_suspected_pages.append(page_idx)
             if recompose_failures:

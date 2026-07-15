@@ -496,6 +496,189 @@ def sanitize_cfg_values(cfg):
             cfg[field] = None
     return cleared
 
+# ================= Universal Config Sanitization & Type-Coercion Layer =================
+# This is the single choke point every cfg dict must pass through before it's used
+# anywhere sensitive (subprocess invocation, tiling math, rendering flags). It exists
+# because cfg values can arrive from three sources with three different trust levels:
+# the bot's own inline-keyboard menus (already validated at entry), a hand-edited or
+# re-imported JSON file (untrusted types), and legacy on-disk user_settings.json rows
+# saved by an older bot version (unknown shape). No matter which one it is, nothing
+# here should ever be able to reach argparse, PIL, or numpy as a raw/garbage value.
+#
+# Schema shape per field: (kind, default, min, max)
+#   kind: "int" | "float" | "bool" | "str" | "choice"
+#   default: safe fallback used when a value is missing/empty/unfixable (None means
+#            "leave unset so the engine applies its own built-in default")
+#   min/max: inclusive numeric bounds, or None if unbounded on that side
+# "choice" fields resolve their legal value set from VALID_CHOICES / the *_OPTIONS
+# lists defined above, via _resolve_choice_set().
+CONFIG_SCHEMA = {
+    # --- Batching & Parallelism ---
+    "parallel_requests":             ("int",   1,    1,    20),
+    "batch_parallel_within_pages":   ("bool",  None, None, None),
+    "batch_previous_context_images": ("int",   0,    0,    10),
+    "batch_previous_context_texts":  ("int",   3,    0,    50),
+
+    # --- Tiling & Image Splitting (Manhwa long-strip) ---
+    "tile_enabled":             ("bool",  True, None, None),
+    "tile_height":              ("int",   MANHWA_TILE_HEIGHT,             64, 20000),
+    "tile_search_radius":       ("int",   MANHWA_TILE_OVERLAP,             1,  5000),
+    "tile_trigger_height":      ("int",   MANHWA_TILE_TRIGGER_HEIGHT,     64, 50000),
+    "tile_flat_threshold":      ("float", MANHWA_SAFE_CUT_FLAT_THRESHOLD, 0.0, 255.0),
+    "tile_seam_band_px":        ("int",   40,   1,    2000),
+    "tile_seam_diff_threshold": ("float", 6.0,  0.0,  255.0),
+    "tile_min_cuts":            ("int",   MANHWA_TILE_MIN_CUTS, 0, 100),
+    "tile_max_cuts":            ("int",   MANHWA_TILE_MAX_CUTS, 1, 100),
+
+    # --- Detection & OCR ---
+    "seg_model":             ("choice", None, None, None),
+    "bubble_detector_model": ("choice", None, None, None),
+    "ocr_method":            ("choice", None, None, None),
+    "confidence":            ("float", 0.6,  0.0, 1.0),
+    "conjoined_confidence":  ("float", 0.35, 0.0, 1.0),
+    "panel_confidence":      ("float", 0.25, 0.0, 1.0),
+    "osb_confidence":        ("float", 0.6,  0.0, 1.0),
+
+    # --- Font & Styling ---
+    "font_name":          ("str",   None, None, None),
+    "min_font_size":      ("int",   None, 1,   500),
+    "max_font_size":      ("int",   None, 1,   500),
+    "line_spacing_mult":  ("float", None, 0.1, 10.0),
+    "subpixel_rendering": ("bool",  None, None, None),
+    "font_hinting":       ("choice",None, None, None),
+    "use_ligatures":      ("bool",  None, None, None),
+    "osb_outline_width":  ("float", 3.0,  0.0, 50.0),
+    "osb_line_spacing":   ("float", 1.0,  0.1, 10.0),
+
+    # --- Inpainting & Upscaling ---
+    "osb_inpainting_method": ("choice", None, None, None),
+    "upscale_method":        ("choice", None, None, None),
+    "image_upscale_mode":    ("choice", None, None, None),
+    "image_upscale_factor":  ("float", 2.0, 1.0, 8.0),
+}
+
+_CHOICE_SOURCES = {
+    "seg_model": SEG_MODEL_OPTIONS,
+    "bubble_detector_model": BUBBLE_DETECTOR_OPTIONS,
+    "ocr_method": OCR_METHOD_OPTIONS,
+    "font_hinting": FONT_HINTING_OPTIONS,
+}
+
+def _resolve_choice_set(field):
+    if field in VALID_CHOICES:
+        return VALID_CHOICES[field]
+    src = _CHOICE_SOURCES.get(field)
+    return set(src) if src else None
+
+def _coerce_one(field, val, kind, default, lo, hi):
+    """Returns (coerced_value, was_changed). Never raises."""
+    if val is None:
+        return None, False
+    if isinstance(val, str) and val.strip() == "":
+        return None, True  # empty string counts as "unset"
+
+    try:
+        if kind == "int":
+            if isinstance(val, bool):
+                raise ValueError
+            coerced = int(val) if isinstance(val, float) else int(str(val).strip())
+        elif kind == "float":
+            if isinstance(val, bool):
+                raise ValueError
+            coerced = float(val) if isinstance(val, (int, float)) else float(str(val).strip())
+        elif kind == "bool":
+            if isinstance(val, bool):
+                coerced = val
+            elif isinstance(val, (int, float)):
+                coerced = bool(val)
+            elif isinstance(val, str):
+                low = val.strip().lower()
+                if low in ("true", "1", "yes", "on"):
+                    coerced = True
+                elif low in ("false", "0", "no", "off"):
+                    coerced = False
+                else:
+                    raise ValueError
+            else:
+                raise ValueError
+        elif kind == "str":
+            coerced = str(val)
+        elif kind == "choice":
+            allowed = _resolve_choice_set(field)
+            coerced = str(val)
+            if allowed is not None and coerced not in allowed:
+                return default, True
+            return coerced, False
+        else:
+            return default, True
+    except (ValueError, TypeError):
+        return default, True
+
+    changed = coerced != val
+    if kind in ("int", "float"):
+        if lo is not None and coerced < lo:
+            return lo, True
+        if hi is not None and coerced > hi:
+            return hi, True
+    return coerced, changed
+
+def sanitize_and_coerce_config(cfg):
+    """The bulletproof fallback layer: walks CONFIG_SCHEMA (plus the remaining
+    VALID_CHOICES fields it doesn't cover) over the given cfg dict, force-casting
+    strings to the correct int/float/bool type and clamping to safe ranges. Any
+    field that's missing, empty, or holds a value that can't be made sane is
+    replaced with its schema default (which may be None, meaning "let the engine
+    fall back to its own built-in default").
+
+    This never raises and never leaves a field in a state that could crash
+    downstream code (tiling math, subprocess argv construction, PIL/numpy calls).
+    Call it on every cfg dict right before it's used for anything consequential —
+    whether that dict came from the bot's own menus, an imported settings JSON, or
+    an old on-disk row from a previous bot version.
+
+    Returns a list of (field, original_value, new_value) corrections made, so the
+    caller can optionally surface a friendly "here's what got auto-fixed" notice.
+    """
+    if not isinstance(cfg, dict):
+        return []
+
+    corrections = []
+    for field, (kind, default, lo, hi) in CONFIG_SCHEMA.items():
+        original = cfg.get(field, None)
+        coerced, changed = _coerce_one(field, original, kind, default, lo, hi)
+        if changed:
+            corrections.append((field, original, coerced))
+        cfg[field] = coerced
+
+    # Cross-field sanity fixes a per-field pass can't catch alone — mirrors the
+    # interactive UI's own guardrails so an imported/legacy config can't smuggle
+    # in an inverted or self-contradictory pair that would confuse the tiler or
+    # the font-size clamp downstream.
+    def _fix_pair(lo_key, hi_key):
+        lo_v, hi_v = cfg.get(lo_key), cfg.get(hi_key)
+        if lo_v is not None and hi_v is not None and lo_v > hi_v:
+            corrections.append((f"{lo_key}/{hi_key}", (lo_v, hi_v), None))
+            cfg[lo_key] = None
+            cfg[hi_key] = None
+
+    _fix_pair("min_font_size", "max_font_size")
+    _fix_pair("tile_height", "tile_trigger_height")
+    _fix_pair("tile_min_cuts", "tile_max_cuts")
+
+    # Sweep every remaining VALID_CHOICES field not already in CONFIG_SCHEMA
+    # (e.g. osb_flux_backend, translation_mode, reading_direction, ...) so the
+    # ENTIRE settings surface is covered, not just the categories called out above.
+    for field, allowed in VALID_CHOICES.items():
+        if field in CONFIG_SCHEMA:
+            continue
+        val = cfg.get(field)
+        if val is not None and val not in allowed:
+            corrections.append((field, val, None))
+            cfg[field] = None
+
+    return corrections
+
+
 # ================= Extended Settings Registry (auto-derived from main.py argparse) =================
 # Every field here mirrors an actual --flag in MangaTranslator/main.py exactly (type, default,
 # choices), so values entered through these menus can never desync from what the engine accepts.
@@ -1623,16 +1806,25 @@ async def receive_files(client, message: Message):
         unknown_keys = [k for k in imported.keys() if k not in merged]
         known_imported = {k: v for k, v in imported.items() if k in merged}
         merged.update(known_imported)
-        cleared = sanitize_cfg_values(merged)
+        # Full type-coercion + range-clamp + choice-validation pass. This is the
+        # untrusted-input entry point (a user-supplied JSON file can contain any
+        # type for any key -- strings where ints are expected, out-of-range floats,
+        # booleans as "yes"/"1", etc.), so every field goes through the schema
+        # before it's ever allowed to reach the subprocess or the tiling pipeline.
+        corrections = sanitize_and_coerce_config(merged)
         user_settings[str(user_id)] = merged
         await save_user_config(user_id)
         cfg = get_user_config(user_id)
         report_lines = ["✅ **Settings imported and applied.**"]
-        if cleared:
-            report_lines.append("\n⚠️ **Invalid values were reset to default:**")
-            for field, bad_value in cleared:
-                allowed = ", ".join(sorted(VALID_CHOICES[field]))
-                report_lines.append(f"• `{field}` = `{bad_value}` → not a valid choice (allowed: {allowed})")
+        if corrections:
+            report_lines.append("\n⚠️ **Some values were auto-corrected to safe defaults:**")
+            for field, bad_value, new_value in corrections[:15]:
+                if new_value is None:
+                    report_lines.append(f"• `{field}` = `{bad_value}` → reset to engine default (invalid/out of range)")
+                else:
+                    report_lines.append(f"• `{field}` = `{bad_value}` → `{new_value}`")
+            if len(corrections) > 15:
+                report_lines.append(f"...and {len(corrections) - 15} more.")
         if unknown_keys:
             shown = ", ".join(unknown_keys[:10])
             more = " ..." if len(unknown_keys) > 10 else ""
@@ -2059,6 +2251,19 @@ def _find_safe_cut_row(row_flatness, target_y, search_window, min_y, max_y, flat
             return up
     return None  
 
+def _safe_num(val, kind, fallback):
+    """Best-effort coercion used as a last line of defense inside the tiling math
+    itself. sanitize_and_coerce_config() should already have cleaned cfg by the
+    time it gets here, but tile_tall_pages/recompose_tiled_page can in principle
+    be called directly (e.g. future code paths, tests), so this guarantees the
+    arithmetic below can never receive a str/None/garbage value and TypeError."""
+    if val is None:
+        return fallback
+    try:
+        return int(val) if kind == "int" else float(val)
+    except (TypeError, ValueError):
+        return fallback
+
 def tile_tall_pages(input_dir, ordered_map, cfg=None):
     from PIL import Image
 
@@ -2066,19 +2271,23 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
     if cfg.get("tile_enabled") is False:
         return {} 
 
-    tile_height = cfg.get("tile_height") or MANHWA_TILE_HEIGHT
-    tile_search_radius = cfg.get("tile_search_radius") or MANHWA_TILE_OVERLAP
-    tile_trigger_height = cfg.get("tile_trigger_height") or MANHWA_TILE_TRIGGER_HEIGHT
-    tile_flat_threshold = cfg.get("tile_flat_threshold") or MANHWA_SAFE_CUT_FLAT_THRESHOLD
+    tile_height = _safe_num(cfg.get("tile_height"), "int", MANHWA_TILE_HEIGHT)
+    tile_search_radius = _safe_num(cfg.get("tile_search_radius"), "int", MANHWA_TILE_OVERLAP)
+    tile_trigger_height = _safe_num(cfg.get("tile_trigger_height"), "int", MANHWA_TILE_TRIGGER_HEIGHT)
+    tile_flat_threshold = _safe_num(cfg.get("tile_flat_threshold"), "float", MANHWA_SAFE_CUT_FLAT_THRESHOLD)
+    if tile_height < 1:
+        tile_height = MANHWA_TILE_HEIGHT
+    if tile_search_radius < 1:
+        tile_search_radius = MANHWA_TILE_OVERLAP
+    if tile_trigger_height < 1:
+        tile_trigger_height = MANHWA_TILE_TRIGGER_HEIGHT
     # min_cuts: 0 = it's fine for a page to end up with zero cuts (untiled).
     # max_cuts: hard cap on the number of cuts made per page — once reached,
     # whatever height remains is kept as a single final tile (which may be
     # taller than tile_height) instead of forcing another cut through a
     # bubble/panel.
-    tile_min_cuts = cfg.get("tile_min_cuts")
-    tile_min_cuts = MANHWA_TILE_MIN_CUTS if tile_min_cuts is None else tile_min_cuts
-    tile_max_cuts = cfg.get("tile_max_cuts")
-    tile_max_cuts = MANHWA_TILE_MAX_CUTS if tile_max_cuts is None else tile_max_cuts
+    tile_min_cuts = _safe_num(cfg.get("tile_min_cuts"), "int", MANHWA_TILE_MIN_CUTS)
+    tile_max_cuts = _safe_num(cfg.get("tile_max_cuts"), "int", MANHWA_TILE_MAX_CUTS)
     if tile_max_cuts < 1:
         tile_max_cuts = 1
     if tile_min_cuts < 0:
@@ -2206,8 +2415,10 @@ def _seam_looks_duplicated(recomposed_im, seam_y, band_px=SEAM_CHECK_BAND_PX, di
 def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None):
     from PIL import Image
     cfg = cfg or {}
-    seam_band_px = cfg.get("tile_seam_band_px") or SEAM_CHECK_BAND_PX
-    seam_diff_threshold = cfg.get("tile_seam_diff_threshold") or SEAM_DUPLICATE_DIFF_THRESHOLD
+    seam_band_px = _safe_num(cfg.get("tile_seam_band_px"), "int", SEAM_CHECK_BAND_PX)
+    seam_diff_threshold = _safe_num(cfg.get("tile_seam_diff_threshold"), "float", SEAM_DUPLICATE_DIFF_THRESHOLD)
+    if seam_band_px < 1:
+        seam_band_px = SEAM_CHECK_BAND_PX
 
     tiles = manifest_entry["tiles"]
     heights = manifest_entry["heights"]
@@ -2469,30 +2680,49 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             if cli_supports_flag("--osb-font-dir"):
                 cmd += ["--osb-font-dir", font_dir_for_run]
 
-        # SAFETY NET: strip any choice-restricted field holding an invalid value
-        # (e.g. a stale/hand-edited translation_mode like "contextual") before it
-        # can reach main.py's argparse and abort the whole job with "invalid choice".
-        last_minute_cleared = sanitize_cfg_values(cfg)
-        if last_minute_cleared:
+        # SAFETY NET: this is the last point before cfg values become subprocess
+        # argv, so run the FULL type-coercion + range-clamp + choice-validation
+        # pass here regardless of where cfg came from (fresh menu edits, an
+        # imported JSON, or an old on-disk row from a previous bot version).
+        # This guarantees no string-typed number, out-of-range value, or invalid
+        # choice can ever reach argparse and abort the whole job.
+        last_minute_corrections = sanitize_and_coerce_config(cfg)
+        if last_minute_corrections:
             await save_user_config(user_id)
-            bad_list = ", ".join(f"{f}='{v}'" for f, v in last_minute_cleared)
+            bad_list = ", ".join(
+                f"{f}='{old_v}'->'{new_v}'" if new_v is not None else f"{f}='{old_v}'->default"
+                for f, old_v, new_v in last_minute_corrections[:10]
+            )
+            more = f" (+{len(last_minute_corrections) - 10} more)" if len(last_minute_corrections) > 10 else ""
             await safe_edit(
                 status_msg,
-                f"⚠️ Corrected invalid setting(s) before running: {bad_list} "
-                f"(reset to engine default). Continuing..."
+                f"⚠️ Corrected setting(s) before running: {bad_list}{more}. Continuing..."
             )
 
         # INJECT ALL CUSTOM PARAMETERS
+        # Defense-in-depth: even after sanitize_and_coerce_config() above, wrap
+        # every single flag append in its own try/except so one unexpected value
+        # (e.g. a key whose CLI mapping doesn't match its expected val_type, or a
+        # dict/list slipping through from a hand-edited JSON) can only skip that
+        # one flag instead of throwing and killing the whole translation job.
+        skipped_flags = []
         for key, config_meta in CLI_MAPPINGS.items():
-            flag, val_type = config_meta
-            val = cfg.get(key)
-            if val is not None and cli_supports_flag(flag):
+            try:
+                flag, val_type = config_meta
+                val = cfg.get(key)
+                if val is None or not cli_supports_flag(flag):
+                    continue
                 if val_type == "val":
                     cmd += [flag, str(val)]
                 elif val_type == "bool_true" and val is True:
                     cmd.append(flag)
                 elif val_type == "bool_invert" and val is False:
                     cmd.append(flag)
+            except Exception:
+                skipped_flags.append(key)
+                continue
+        if skipped_flags:
+            print(f"⚠️ Skipped unusable setting(s) for this run: {', '.join(skipped_flags)}")
 
         await safe_edit(status_msg, 
             build_status_text(mode_label, "🧠 OCR + Translation running", file_idx, total_files, 0, total_images, 40),

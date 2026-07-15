@@ -88,6 +88,15 @@ MANHWA_SAFE_CUT_FLAT_THRESHOLD = 3.5
 MANHWA_TILE_MIN_CUTS = 0
 MANHWA_TILE_MAX_CUTS = 6
 
+# Bubble-aware cut detection (replaces row-flatness as the safe-cut check).
+# A lightweight OpenCV contour pass finds actual speech-bubble bounding boxes
+# so cuts can be steered around them directly, instead of just avoiding any
+# "non-flat" row (which can be an art panel edge that isn't a bubble at all,
+# or can miss a bubble that sits on an otherwise textured background).
+MANHWA_SAFETY_PADDING = 10      # px pulled up above a detected bubble's top edge when shifting a cut
+MANHWA_MIN_BUBBLE_SIZE = 40     # px; contours smaller than this (in both w and h) are ignored as noise
+MANHWA_WHITE_THRESHOLD = 240    # 0-255 grayscale threshold used to isolate bubble/background fill
+
 DEFAULT_SYSTEM_PROMPT_NAME = "Default Localization Engine"
 DEFAULT_SYSTEM_PROMPT_TEXT = (
     "You are a professional multi-language manga and comic localization engine.\n"
@@ -144,8 +153,9 @@ def default_config():
 
         # Tiling Settings
         "tile_enabled": None, "tile_height": None, "tile_search_radius": None, 
-        "tile_trigger_height": None, "tile_flat_threshold": None, "tile_seam_band_px": None, 
+        "tile_trigger_height": None, "tile_seam_band_px": None, 
         "tile_seam_diff_threshold": None, "tile_min_cuts": None, "tile_max_cuts": None,
+        "tile_safety_padding": None, "tile_min_bubble_size": None, "tile_white_threshold": None,
 
         # UI Modifiable Flags (Appearance, Detect)
         "min_font_size": None, "max_font_size": None, "auto_vertical_text": None,
@@ -743,7 +753,9 @@ def kb_tiling_menu(cfg):
     height = _tile_val_label(cfg, "tile_height", str(MANHWA_TILE_HEIGHT))
     radius = _tile_val_label(cfg, "tile_search_radius", str(MANHWA_TILE_OVERLAP))
     trigger = _tile_val_label(cfg, "tile_trigger_height", str(MANHWA_TILE_TRIGGER_HEIGHT))
-    flat = _tile_val_label(cfg, "tile_flat_threshold", str(MANHWA_SAFE_CUT_FLAT_THRESHOLD))
+    padding = _tile_val_label(cfg, "tile_safety_padding", str(MANHWA_SAFETY_PADDING))
+    min_bubble = _tile_val_label(cfg, "tile_min_bubble_size", str(MANHWA_MIN_BUBBLE_SIZE))
+    white_thresh = _tile_val_label(cfg, "tile_white_threshold", str(MANHWA_WHITE_THRESHOLD))
     band = _tile_val_label(cfg, "tile_seam_band_px", str(SEAM_CHECK_BAND_PX))
     diff = _tile_val_label(cfg, "tile_seam_diff_threshold", str(SEAM_DUPLICATE_DIFF_THRESHOLD))
     min_cuts = _tile_val_label(cfg, "tile_min_cuts", str(MANHWA_TILE_MIN_CUTS))
@@ -754,7 +766,9 @@ def kb_tiling_menu(cfg):
         [InlineKeyboardButton(f"📏 Trigger Height (px): {trigger}", callback_data="tile_field_tile_trigger_height")],
         [InlineKeyboardButton(f"📐 Tile Height (px): {height}", callback_data="tile_field_tile_height")],
         [InlineKeyboardButton(f"🔍 Safe-Cut Search Radius (px): {radius}", callback_data="tile_field_tile_search_radius")],
-        [InlineKeyboardButton(f"⬜ Flatness Threshold: {flat}", callback_data="tile_field_tile_flat_threshold")],
+        [InlineKeyboardButton(f"🛟 Bubble Safety Padding (px): {padding}", callback_data="tile_field_tile_safety_padding")],
+        [InlineKeyboardButton(f"🫧 Min Bubble Size (px): {min_bubble}", callback_data="tile_field_tile_min_bubble_size")],
+        [InlineKeyboardButton(f"⬜ White Threshold (0-255): {white_thresh}", callback_data="tile_field_tile_white_threshold")],
         [InlineKeyboardButton(f"📊 Seam Check Band (px): {band}", callback_data="tile_field_tile_seam_band_px")],
         [InlineKeyboardButton(f"🎯 Seam Duplicate Diff Threshold: {diff}", callback_data="tile_field_tile_seam_diff_threshold")],
         [InlineKeyboardButton(f"🔽 Min Cuts: {min_cuts}", callback_data="tile_field_tile_min_cuts")],
@@ -1415,14 +1429,20 @@ async def handle_callbacks(client, query: CallbackQuery):
             query.message,
             "✂️ **Tiling Settings (Manhwa)**\n"
             "Controls how tall, stitched long-strip pages get sliced into "
-            "detector-sized windows before bubble detection, so art doesn't "
-            "get crushed down and bubbles don't vanish.\n\n"
+            "detector-sized windows for OCR/translation, using a fast OpenCV "
+            "bubble detector so a cut never lands mid-bubble.\n\n"
             "• **Trigger Height**: pages taller than this get tiled at all.\n"
             "• **Tile Height**: target height per tile.\n"
-            "• **Safe-Cut Search Radius**: how far to search for a blank row "
-            "near the target cut line, so a cut never lands mid-bubble.\n"
-            "• **Flatness Threshold**: how blank a row must be to count as "
-            "a safe cut.\n"
+            "• **Safe-Cut Search Radius**: how far to widen the search for a "
+            "bubble-free row if the target cut line lands inside a bubble.\n"
+            "• **Bubble Safety Padding**: extra px pulled up above a detected "
+            "bubble's top edge whenever a cut is shifted to avoid it. Also "
+            "used for the look-ahead check between pages, so a bubble cut off "
+            "at a page's bottom edge is carried whole onto the next page.\n"
+            "• **Min Bubble Size**: contours smaller than this (in width and "
+            "height) are ignored as noise, not treated as bubbles.\n"
+            "• **White Threshold**: grayscale cutoff (0-255) used to isolate "
+            "bubble/background fill from art when detecting bubbles.\n"
             "• **Seam Check Band / Diff Threshold**: how the final duplicate-"
             "text check compares pixels just above/below a seam.\n"
             "• **Min Cuts**: lowest number of cuts allowed on a page — `0` "
@@ -1441,18 +1461,26 @@ async def handle_callbacks(client, query: CallbackQuery):
             "tile_height": "Tile Height (px)",
             "tile_search_radius": "Safe-Cut Search Radius (px)",
             "tile_trigger_height": "Trigger Height (px)",
-            "tile_flat_threshold": "Flatness Threshold",
+            "tile_safety_padding": "Bubble Safety Padding (px)",
+            "tile_min_bubble_size": "Min Bubble Size (px)",
+            "tile_white_threshold": "White Threshold (0-255)",
             "tile_seam_band_px": "Seam Check Band (px)",
             "tile_seam_diff_threshold": "Seam Duplicate Diff Threshold",
             "tile_min_cuts": "Min Cuts",
             "tile_max_cuts": "Max Cuts",
         }.get(field, field)
-        int_fields = {"tile_height", "tile_search_radius", "tile_trigger_height", "tile_seam_band_px", "tile_min_cuts", "tile_max_cuts"}
+        int_fields = {
+            "tile_height", "tile_search_radius", "tile_trigger_height", "tile_seam_band_px",
+            "tile_min_cuts", "tile_max_cuts", "tile_safety_padding", "tile_min_bubble_size",
+            "tile_white_threshold",
+        }
         hint = "a whole number, e.g. `1600`" if field in int_fields else "a decimal, e.g. `3.5`"
         if field == "tile_min_cuts":
             hint = "a whole number, `0` or more (0 = allow zero cuts)"
         elif field == "tile_max_cuts":
             hint = "a whole number, `1` or more (caps total cuts per page)"
+        elif field == "tile_white_threshold":
+            hint = "a whole number from `0` to `255`"
         awaiting_reply[user_id] = {"type": "tile_field", "extra": {"field": field}}
         await safe_edit(
             query.message,
@@ -1477,7 +1505,8 @@ async def handle_callbacks(client, query: CallbackQuery):
     if data == "tile_reset_all":
         for field in (
             "tile_enabled", "tile_height", "tile_search_radius", "tile_trigger_height",
-            "tile_flat_threshold", "tile_seam_band_px", "tile_seam_diff_threshold",
+            "tile_safety_padding", "tile_min_bubble_size", "tile_white_threshold",
+            "tile_seam_band_px", "tile_seam_diff_threshold",
             "tile_min_cuts", "tile_max_cuts",
         ):
             cfg[field] = None
@@ -1822,7 +1851,9 @@ async def handle_reply_capture(client, message: Message):
             "tile_height": "Tile Height (px)",
             "tile_search_radius": "Safe-Cut Search Radius (px)",
             "tile_trigger_height": "Trigger Height (px)",
-            "tile_flat_threshold": "Flatness Threshold",
+            "tile_safety_padding": "Bubble Safety Padding (px)",
+            "tile_min_bubble_size": "Min Bubble Size (px)",
+            "tile_white_threshold": "White Threshold (0-255)",
             "tile_seam_band_px": "Seam Check Band (px)",
             "tile_seam_diff_threshold": "Seam Duplicate Diff Threshold",
             "tile_min_cuts": "Min Cuts",
@@ -1836,13 +1867,22 @@ async def handle_reply_capture(client, message: Message):
             await message.reply_text(f"✅ {pretty} reset to Original/Default.", reply_markup=kb_tiling_menu(cfg))
             return
 
-        int_fields = {"tile_height", "tile_search_radius", "tile_trigger_height", "tile_seam_band_px", "tile_min_cuts", "tile_max_cuts"}
+        int_fields = {
+            "tile_height", "tile_search_radius", "tile_trigger_height", "tile_seam_band_px",
+            "tile_min_cuts", "tile_max_cuts", "tile_safety_padding", "tile_min_bubble_size",
+            "tile_white_threshold",
+        }
         is_int_field = field in int_fields
-        # tile_min_cuts is the only field allowed to be 0 (0 = no forced cutting).
-        min_allowed = 0 if field == "tile_min_cuts" else 1
+        # tile_min_cuts and tile_safety_padding are allowed to be 0 (0 = no forced
+        # cutting / no extra padding); tile_white_threshold has its own 0-255 check below.
+        zero_allowed_fields = {"tile_min_cuts", "tile_safety_padding"}
+        min_allowed = 0 if field in zero_allowed_fields else 1
         try:
             value = int(text) if is_int_field else float(text)
-            if is_int_field:
+            if field == "tile_white_threshold":
+                if not (0 <= value <= 255):
+                    raise ValueError
+            elif is_int_field:
                 if value < min_allowed:
                     raise ValueError
             elif value <= 0:
@@ -1850,6 +1890,10 @@ async def handle_reply_capture(client, message: Message):
         except ValueError:
             if field == "tile_min_cuts":
                 hint = "a whole number, `0` or greater (e.g. `0` or `2`)"
+            elif field == "tile_safety_padding":
+                hint = "a whole number, `0` or greater (e.g. `0` or `10`)"
+            elif field == "tile_white_threshold":
+                hint = "a whole number from `0` to `255`"
             elif is_int_field:
                 hint = "a positive whole number (e.g. `1600`)"
             else:
@@ -2053,23 +2097,59 @@ def flatten_and_order(input_dir, content_type="manhwa", cfg=None):
     return ordered_map, tile_manifest
 
 # ================= Long-Strip Tiling (Manhwa) =================
-def _compute_row_flatness(im):
-    import numpy as np
-    gray = im.convert("L")
-    arr = np.asarray(gray, dtype=np.float32)
-    return arr.std(axis=1)
+def _get_bubble_y_ranges_cv(pil_image, cfg=None):
+    """Fast, model-free speech-bubble Y-range detector.
 
-def _find_safe_cut_row(row_flatness, target_y, search_window, min_y, max_y, flat_threshold=MANHWA_SAFE_CUT_FLAT_THRESHOLD):
-    if row_flatness[target_y] < flat_threshold:
-        return target_y
-    for delta in range(1, search_window + 1):
-        up = target_y - delta
-        down = target_y + delta
-        if down <= max_y and row_flatness[down] < flat_threshold:
-            return down
-        if up >= min_y and row_flatness[up] < flat_threshold:
-            return up
-    return None  
+    Uses a plain OpenCV threshold + external-contour pass to find bubble/panel
+    fill regions in `pil_image`, returning their vertical (ymin/ymax) extents
+    sorted top-to-bottom. This replaces row-flatness as the basis for safe-cut
+    decisions: a "flat" row can be a blank background strip that isn't a
+    bubble at all, or can fail to flag a bubble sitting on textured art, so
+    finding actual bubble bounding boxes lets cuts be steered around them
+    directly instead of merely avoiding "non-flat" rows.
+    """
+    import cv2
+    import numpy as np
+
+    cfg = cfg or {}
+    white_threshold = cfg.get("tile_white_threshold")
+    white_threshold = MANHWA_WHITE_THRESHOLD if white_threshold is None else white_threshold
+    min_bubble_size = cfg.get("tile_min_bubble_size")
+    min_bubble_size = MANHWA_MIN_BUBBLE_SIZE if min_bubble_size is None else min_bubble_size
+
+    open_cv_image = np.array(pil_image.convert("RGB"))
+    gray = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2GRAY)
+    _, thresh = cv2.threshold(gray, white_threshold, 255, cv2.THRESH_BINARY)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    img_width = pil_image.width
+    bubble_ranges = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if (w > min_bubble_size and h > min_bubble_size) and (w < img_width * 0.9):
+            bubble_ranges.append({'ymin': y, 'ymax': y + h})
+
+    return sorted(bubble_ranges, key=lambda k: k['ymin'])
+
+def _find_safe_cut_row_cv(bubble_ranges, target_y, search_window, min_y, max_y, safety_padding):
+    """Bubble-aware replacement for the old flatness-based `_find_safe_cut_row`.
+
+    Returns a cut row near `target_y` that doesn't land inside any detected
+    bubble. If `target_y` itself falls inside a bubble, the cut is shifted up
+    to just above that bubble's top edge (minus `safety_padding`). If no
+    bubble covers `target_y`, `target_y` is used as-is (no search needed,
+    since bubble contours -- unlike row-flatness -- tell us definitively
+    whether a given row is inside a bubble or not).
+    """
+    for bubble in bubble_ranges:
+        if bubble['ymin'] <= target_y < bubble['ymax']:
+            shifted = bubble['ymin'] - safety_padding
+            if shifted > min_y:
+                return shifted
+            # Bubble starts too close to (or before) min_y to shift within
+            # bounds -- fall through to widen search from the caller instead.
+            return None
+    return target_y
 
 def tile_tall_pages(input_dir, ordered_map, cfg=None):
     from PIL import Image
@@ -2081,9 +2161,10 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
     tile_height = cfg.get("tile_height") or MANHWA_TILE_HEIGHT
     tile_search_radius = cfg.get("tile_search_radius") or MANHWA_TILE_OVERLAP
     tile_trigger_height = cfg.get("tile_trigger_height") or MANHWA_TILE_TRIGGER_HEIGHT
-    tile_flat_threshold = cfg.get("tile_flat_threshold") or MANHWA_SAFE_CUT_FLAT_THRESHOLD
+    safety_padding = cfg.get("tile_safety_padding")
+    safety_padding = MANHWA_SAFETY_PADDING if safety_padding is None else safety_padding
     # min_cuts: 0 = it's fine for a page to end up with zero cuts (untiled).
-    # max_cuts: hard cap on the number of cuts made per page — once reached,
+    # max_cuts: hard cap on the number of cuts made per page -- once reached,
     # whatever height remains is kept as a single final tile (which may be
     # taller than tile_height) instead of forcing another cut through a
     # bubble/panel.
@@ -2098,102 +2179,174 @@ def tile_tall_pages(input_dir, ordered_map, cfg=None):
     if tile_min_cuts > tile_max_cuts:
         tile_min_cuts = tile_max_cuts
 
+    # Look-ahead boundary shifting (page N -> page N+1 carry-over): if page N's
+    # bottom edge lands mid-bubble, that bubble (plus the strip of image under
+    # it) is cropped off and prepended, 0px gap, onto page N+1 before N+1 runs
+    # its own tiling loop. This never changes the manifest format -- the
+    # leftover just becomes part of the next page's own in-memory image before
+    # slicing, so every page still reports a single width/original_height/etc.
+    # If it's the last page, no look-ahead or shifting happens.
+    LOOKAHEAD_BAND_PX = 20  # how close to a page's bottom edge a bubble must be to trigger carry-over
+    ordered_items = list(ordered_map.items())
+
     manifest = {}
-    for idx, fname in list(ordered_map.items()):
+    leftover_from_previous = None  # PIL.Image cropped off the bottom of the prior page, or None
+
+    for pos, (idx, fname) in enumerate(ordered_items):
         path = os.path.join(input_dir, fname)
         if not os.path.exists(path):
+            leftover_from_previous = None
             continue
-        with Image.open(path) as im:
-            width, height = im.size
-            if height <= tile_trigger_height:
-                continue  
 
-            im = im.convert("RGB")
-            row_flatness = _compute_row_flatness(im)
-            search_window = tile_search_radius  
+        with Image.open(path) as im_file:
+            im = im_file.convert("RGB")
 
-            tile_files = []
-            tile_heights = []
-            forced_cut_rows = []  # cuts that landed on non-flat (likely mid-art/mid-bubble) rows
-            y = 0
-            tile_n = 0
-            cuts_made = 0  # number of cuts actually made so far (tiles - 1)
-            max_extend_attempts = 6  # cap the widening search so we don't loop forever on noisy art
-            while y < height:
-                target_bottom = min(y + tile_height, height)
-                reached_max_cuts = cuts_made >= tile_max_cuts
-                if target_bottom >= height or reached_max_cuts:
-                    # Either we're at the true bottom of the strip, or we've hit the
-                    # Max Cuts cap — either way, take the rest as one final tile
-                    # rather than forcing another cut that might slice a bubble.
-                    cut = height
-                    was_forced = False
-                else:
-                    cut = _find_safe_cut_row(row_flatness, target_bottom, search_window, y + 1, height - 1, tile_flat_threshold)
-                    was_forced = cut is None
-                    extended_target = target_bottom
-                    attempts = 0
-                    while cut is None and extended_target < height and attempts < max_extend_attempts:
-                        extended_target = min(extended_target + tile_search_radius, height)
-                        attempts += 1
-                        if extended_target >= height:
-                            cut = height
-                            was_forced = False  # cutting at the true bottom of the strip is fine
-                            break
-                        cut = _find_safe_cut_row(row_flatness, extended_target, search_window, y + 1, height - 1, tile_flat_threshold)
-                        if cut is not None:
-                            was_forced = False
-                    if cut is None:
-                        # Never found a flat row even after widening the search — fall back to
-                        # the original target and flag it, since this cut may slice through
-                        # a bubble/panel and cause duplicated or clipped content at the seam.
-                        cut = target_bottom
-                        was_forced = True
+        if leftover_from_previous is not None:
+            leftover = leftover_from_previous
+            leftover_from_previous = None
+            width = max(leftover.width, im.width)
+            combined = Image.new("RGB", (width, leftover.height + im.height), (255, 255, 255))
+            combined.paste(leftover, ((width - leftover.width) // 2, 0))
+            combined.paste(im, ((width - im.width) // 2, leftover.height))
+            im = combined
+            leftover.close()
 
-                if was_forced:
-                    forced_cut_rows.append(cut)
+        width, height = im.size
+        is_last_page = (pos == len(ordered_items) - 1)
 
-                # Guard against a zero/near-zero-height crop. This can happen when
-                # the safe-cut search (or its widening fallback) lands `cut` right
-                # on top of `y`, or when a prior iteration already consumed almost
-                # the entire remaining height. Saving a degenerate (0-2px tall) JPEG
-                # here produces a file that downstream OpenCV code can fail to
-                # decode, surfacing as a "!_src.empty()" cvtColor assertion later
-                # in the pipeline. If the slice is too thin to be a real tile,
-                # just extend it to the bottom of the page instead of emitting it.
-                MIN_TILE_HEIGHT_PX = 8
-                if cut - y < MIN_TILE_HEIGHT_PX:
-                    cut = height
-                    was_forced = False
-
-                tile = im.crop((0, y, width, cut))
-                tile_name = f"{os.path.splitext(fname)[0]}_tile{tile_n:03d}.jpg"
-                tile.save(os.path.join(input_dir, tile_name), quality=(cfg.get("jpeg_quality") if cfg else None) or 90)
-                tile_files.append(tile_name)
-                tile_heights.append(cut - y)
-                tile_n += 1
-                if cut < height:
-                    cuts_made += 1
-                if cut >= height:
+        def _carry_over_check(image, w, h):
+            """If a bubble is split at the very bottom edge and more pages
+            remain, shift the cut up above it and return (trimmed_image,
+            trimmed_height, leftover_image_or_None)."""
+            if is_last_page:
+                return image, h, None
+            bubbles = _get_bubble_y_ranges_cv(image, cfg)
+            for bubble in bubbles:
+                if bubble['ymin'] < h and bubble['ymax'] >= (h - LOOKAHEAD_BAND_PX) and bubble['ymax'] > h - 1:
+                    new_split_y = bubble['ymin'] - safety_padding
+                    if new_split_y > 0:
+                        leftover_img = image.crop((0, new_split_y, w, h))
+                        trimmed_img = image.crop((0, 0, w, new_split_y))
+                        return trimmed_img, new_split_y, leftover_img
                     break
-                y = cut
+            return image, h, None
 
-            # Min Cuts: if this page ended up with fewer cuts than required and it
-            # still had room to cut further, that's fine — min_cuts=0 just means we
-            # never force extra cuts beyond what the page actually needs. We only
-            # log tile count here; we never manufacture additional cuts purely to
-            # satisfy a minimum, since inventing a cut risks slicing a bubble.
+        if height <= tile_trigger_height:
+            # Page doesn't need tiling on its own merits, but its bottom edge
+            # still needs the carry-over check (unless this is the last page).
+            im, height, leftover_from_previous = _carry_over_check(im, width, height)
 
-            manifest[idx] = {
-                "tiles": tile_files,
-                "heights": tile_heights,
-                "width": width,
-                "original_height": height,
-                "original_name": fname,
-                "forced_cut_rows": forced_cut_rows,
-                "cuts_made": cuts_made,
-            }
-        os.remove(path)  
+            if height <= tile_trigger_height:
+                # Still doesn't need tiling -- pass through as a single "tile".
+                out_name = fname
+                im.save(os.path.join(input_dir, out_name), quality=(cfg.get("jpeg_quality") if cfg else None) or 90)
+                manifest[idx] = {
+                    "tiles": [out_name],
+                    "heights": [height],
+                    "width": width,
+                    "original_height": height,
+                    "original_name": fname,
+                    "forced_cut_rows": [],
+                    "cuts_made": 0,
+                }
+                if path != os.path.join(input_dir, out_name):
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+                continue
+        else:
+            im, height, leftover_from_previous = _carry_over_check(im, width, height)
+
+        bubble_ranges = _get_bubble_y_ranges_cv(im, cfg)
+
+        tile_files = []
+        tile_heights = []
+        forced_cut_rows = []  # cuts that landed on/near a bubble even after widening the search
+        y = 0
+        tile_n = 0
+        cuts_made = 0  # number of cuts actually made so far (tiles - 1)
+        max_extend_attempts = 6  # cap the widening search so we don't loop forever on dense art
+        while y < height:
+            target_bottom = min(y + tile_height, height)
+            reached_max_cuts = cuts_made >= tile_max_cuts
+            if target_bottom >= height or reached_max_cuts:
+                # Either we're at the true bottom of the strip, or we've hit the
+                # Max Cuts cap -- either way, take the rest as one final tile
+                # rather than forcing another cut that might slice a bubble.
+                cut = height
+                was_forced = False
+            else:
+                cut = _find_safe_cut_row_cv(bubble_ranges, target_bottom, tile_search_radius, y + 1, height - 1, safety_padding)
+                was_forced = cut is None
+                extended_target = target_bottom
+                attempts = 0
+                while cut is None and extended_target < height and attempts < max_extend_attempts:
+                    extended_target = min(extended_target + tile_search_radius, height)
+                    attempts += 1
+                    if extended_target >= height:
+                        cut = height
+                        was_forced = False  # cutting at the true bottom of the strip is fine
+                        break
+                    cut = _find_safe_cut_row_cv(bubble_ranges, extended_target, tile_search_radius, y + 1, height - 1, safety_padding)
+                    if cut is not None:
+                        was_forced = False
+                if cut is None:
+                    # Never found a bubble-free cut even after widening the search --
+                    # fall back to the original target and flag it, since this cut
+                    # may slice through a bubble/panel and cause duplicated or
+                    # clipped content at the seam.
+                    cut = target_bottom
+                    was_forced = True
+
+            if was_forced:
+                forced_cut_rows.append(cut)
+
+            # Guard against a zero/near-zero-height crop. This can happen when
+            # the safe-cut search (or its widening fallback) lands `cut` right
+            # on top of `y`, or when a prior iteration already consumed almost
+            # the entire remaining height. Saving a degenerate (0-2px tall) JPEG
+            # here produces a file that downstream OpenCV code can fail to
+            # decode, surfacing as a "!_src.empty()" cvtColor assertion later
+            # in the pipeline. If the slice is too thin to be a real tile,
+            # just extend it to the bottom of the page instead of emitting it.
+            MIN_TILE_HEIGHT_PX = 8
+            if cut - y < MIN_TILE_HEIGHT_PX:
+                cut = height
+                was_forced = False
+
+            tile = im.crop((0, y, width, cut))
+            tile_name = f"{os.path.splitext(fname)[0]}_tile{tile_n:03d}.jpg"
+            tile.save(os.path.join(input_dir, tile_name), quality=(cfg.get("jpeg_quality") if cfg else None) or 90)
+            tile_files.append(tile_name)
+            tile_heights.append(cut - y)
+            tile_n += 1
+            if cut < height:
+                cuts_made += 1
+            if cut >= height:
+                break
+            y = cut
+
+        # Min Cuts: if this page ended up with fewer cuts than required and it
+        # still had room to cut further, that's fine -- min_cuts=0 just means we
+        # never force extra cuts beyond what the page actually needs. We only
+        # log tile count here; we never manufacture additional cuts purely to
+        # satisfy a minimum, since inventing a cut risks slicing a bubble.
+
+        manifest[idx] = {
+            "tiles": tile_files,
+            "heights": tile_heights,
+            "width": width,
+            "original_height": height,
+            "original_name": fname,
+            "forced_cut_rows": forced_cut_rows,
+            "cuts_made": cuts_made,
+        }
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
     return manifest
 
 SEAM_CHECK_BAND_PX = 40
@@ -2214,96 +2367,6 @@ def _seam_looks_duplicated(recomposed_im, seam_y, band_px=SEAM_CHECK_BAND_PX, di
         return False
     diff = np.abs(upper_band - lower_band).mean()
     return diff < diff_threshold
-
-def _line_strength_at_row(arr, row, width_sample=None):
-    """
-    Measure how much a single row stands out from its immediate neighbors
-    (the signature of a leftover seam line: a thin 1-3px band that is
-    noticeably darker/lighter/different-colored than the rows just above and
-    below it). Returns a float delta - the bigger it is, the more visible the
-    line is. arr is HxWx3 float32.
-    """
-    import numpy as np
-    height = arr.shape[0]
-    if row <= 1 or row >= height - 2:
-        return 0.0
-    # Compare the row itself against the average of a few rows just outside
-    # it on both sides, so we detect a thin line even if the overall image
-    # has a smooth gradient running through it.
-    context_above = arr[max(0, row - 4):row - 1, :, :].mean(axis=(0, 1))
-    context_below = arr[row + 2:min(height, row + 5), :, :].mean(axis=(0, 1))
-    context = (context_above + context_below) / 2.0
-    line_rows = arr[row - 1:row + 2, :, :].mean(axis=(0, 1))
-    return float(np.abs(line_rows - context).mean())
-
-
-def _blend_seam_band(arr, seam_y, total_height, band_px):
-    """
-    Cross-fade a band of rows straddling seam_y using real gradients pulled
-    from both sides (several rows each), not just the single row touching the
-    seam. This is the actual merge/adjust step: it replaces the hard join
-    with pixel values that continue each side's local trend into the band,
-    so the two tiles read as one continuous image with no seam artifact.
-    """
-    import numpy as np
-    top = max(0, seam_y - band_px)
-    bottom = min(total_height, seam_y + band_px)
-    band = bottom - top
-    if band <= 1:
-        return arr
-
-    # Pull a short run of rows from each side (not just one row) to get a
-    # real local gradient/texture rather than collapsing to two flat values.
-    sample_px = min(3, band_px)
-    above_sample = arr[max(0, seam_y - sample_px):seam_y, :, :]
-    below_sample = arr[seam_y:min(total_height, seam_y + sample_px), :, :]
-    if above_sample.shape[0] == 0 or below_sample.shape[0] == 0:
-        return arr
-    above_avg = above_sample.mean(axis=0, keepdims=True)
-    below_avg = below_sample.mean(axis=0, keepdims=True)
-
-    weights = np.linspace(0, 1, band, dtype=np.float32).reshape(-1, 1, 1)
-    # Keep each row's own detail (texture/linework) but pull its brightness
-    # and color onto the smooth above->below gradient, so art isn't replaced
-    # with a flat blur - only the seam discontinuity is removed.
-    original_band = arr[top:bottom, :, :]
-    target_gradient = above_avg * (1 - weights) + below_avg * weights
-    band_local_mean = original_band.mean(axis=(1, 2), keepdims=True)
-    corrected = original_band - band_local_mean + target_gradient.mean(axis=(1, 2), keepdims=True)
-    # Full correction right at the seam, tapering to zero correction at the
-    # band edges so it grafts smoothly onto untouched pixels beyond the band.
-    taper = 1.0 - np.abs(np.linspace(-1, 1, band, dtype=np.float32)).reshape(-1, 1, 1)
-    final_band = original_band * (1 - taper) + corrected * taper
-    arr[top:bottom, :, :] = final_band
-    return arr
-
-
-def _fix_all_seams(recomposed_im, seam_ys, total_height, base_band_px=10):
-    """
-    Cut-count -> merge -> adjust/verify -> combine, applied to every seam on
-    the page. Runs once per seam with the base band, then re-checks each
-    seam; any seam that still shows a residual line gets a second, wider pass
-    so the final page has no detectable cut regardless of how many tiles it
-    was split into.
-    """
-    import numpy as np
-    arr = np.asarray(recomposed_im).astype(np.float32)
-
-    # Pass 1: blend every seam.
-    for seam_y in seam_ys:
-        arr = _blend_seam_band(arr, seam_y, total_height, base_band_px)
-
-    # Pass 2 (verify + fix): any seam still showing a visible line gets a
-    # stronger, wider blend. Threshold is intentionally low since even a
-    # faint ~0.03in line is noticeable on a phone screen.
-    RESIDUAL_LINE_THRESHOLD = 4.0
-    for seam_y in seam_ys:
-        strength = _line_strength_at_row(arr, seam_y)
-        if strength > RESIDUAL_LINE_THRESHOLD:
-            arr = _blend_seam_band(arr, seam_y, total_height, base_band_px * 2)
-
-    return np.clip(arr, 0, 255).astype("uint8")
-
 
 def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None):
     from PIL import Image
@@ -2343,22 +2406,32 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None):
             if i < len(translated_tile_paths) - 1:
                 seam_ys.append(y_cursor)
 
-    # Fix every seam so no cut is visually detectable in the final page.
-    # Old approach: blend a narrow band using only the single row directly
-    # above/below the seam. That collapses the whole band to an interpolation
-    # between two rows, which itself creates a visible ~0.03in band whenever
-    # those two rows differ (JPEG block artifacts, independent per-tile
-    # compression, tiny resize drift) - i.e. it was creating a line while
-    # trying to remove one.
-    #
-    # New approach: cut count (seam_ys) -> merge each seam using a real
-    # gradient pulled from several rows on each side -> verify each seam
-    # after blending and apply a stronger pass if a residual line remains ->
-    # combine into one page with no seam feel. Runs unconditionally on every
-    # seam, regardless of how many cuts were made on the page.
+    # Feather each tile seam: a small band of rows straddling the join is
+    # blended between the pixel values just above and just below it. This
+    # softens any visible line at the seam - whether from JPEG compression
+    # drift between independently-saved tiles, or from the resize() above
+    # when the engine returns a tile at a slightly different resolution than
+    # it was sent at. A hard paste (the only thing this function did before)
+    # keeps any such artifact fully visible; this doesn't change page content,
+    # it only smooths a thin band of pixels at each join.
     if seam_ys:
-        arr = _fix_all_seams(recomposed, seam_ys, total_height)
-        recomposed = Image.fromarray(arr, "RGB")
+        import numpy as np
+        FEATHER_PX = 6
+        arr = np.asarray(recomposed).astype(np.float32)
+        for seam_y in seam_ys:
+            top = max(0, seam_y - FEATHER_PX)
+            bottom = min(total_height, seam_y + FEATHER_PX)
+            band = bottom - top
+            if band <= 1:
+                continue
+            weights = np.linspace(0, 1, band, dtype=np.float32).reshape(-1, 1, 1)
+            above_row = arr[max(0, seam_y - 1):seam_y, :, :]
+            below_row = arr[seam_y:seam_y + 1, :, :]
+            if above_row.shape[0] == 0 or below_row.shape[0] == 0:
+                continue
+            blended = above_row * (1 - weights) + below_row * weights
+            arr[top:bottom, :, :] = blended
+        recomposed = Image.fromarray(np.clip(arr, 0, 255).astype("uint8"), "RGB")
 
     # Check every seam for duplicated/misaligned content, not just seams that were
     # forced through non-flat rows. Even a "safe" flat-row cut can look duplicated
@@ -2820,36 +2893,43 @@ def package_output(source_dir, job_root, file_idx, output_format):
                         y += im.height
                         im.close()
 
-                    # Cut count -> merge -> adjust/verify -> combine: each
-                    # tile is saved as its own JPEG (per the configured
-                    # jpeg_quality), so even a "safe" cut row can end up with
-                    # a faint brightness/color difference across the seam
-                    # once tiles are compressed independently. Uses the same
-                    # verified multi-row seam fix as recompose_tiled_page
-                    # (not a 2-row feather, which itself produced a visible
-                    # ~0.03in band) so this fallback path can't leave a
-                    # residual line either.
-                    seam_ys = []
+                    # Feather each tile boundary: each tile is saved as its own
+                    # JPEG (per the configured jpeg_quality), so even a "safe" cut row can end up with
+                    # a faint brightness/color difference across the seam once
+                    # the tiles are compressed independently. A hard paste keeps
+                    # that visible as a thin line. Cross-fading a small band of
+                    # rows on either side of each seam blends the two tiles'
+                    # pixel values there, matching how a continuous webtoon
+                    # image (or CBZ scroll) looks - no visible seam.
+                    import numpy as np
+                    FEATHER_PX = 6
+                    arr = np.asarray(stitched).astype(np.float32)
                     seam_y = 0
                     for im in opened[:-1]:
                         seam_y += im.height
-                        seam_ys.append(seam_y)
-                    if seam_ys:
-                        arr = _fix_all_seams(stitched, seam_ys, total_height)
-                        stitched = Image.fromarray(arr, "RGB")
+                        top = max(0, seam_y - FEATHER_PX)
+                        bottom = min(total_height, seam_y + FEATHER_PX)
+                        band = bottom - top
+                        if band <= 1:
+                            continue
+                        weights = np.linspace(0, 1, band, dtype=np.float32).reshape(-1, 1, 1)
+                        above_row = arr[max(0, seam_y - 1):seam_y, :, :]
+                        below_row = arr[seam_y:seam_y + 1, :, :]
+                        if above_row.shape[0] == 0 or below_row.shape[0] == 0:
+                            continue
+                        blended = above_row * (1 - weights) + below_row * weights
+                        arr[top:bottom, :, :] = blended
+                    stitched = Image.fromarray(np.clip(arr, 0, 255).astype("uint8"), "RGB")
                     pages.append(stitched)
 
             if pages:
-                # Normalize every page to the same width before writing the PDF.
-                # Source PDFs (especially scraped manhwa/webtoon PDFs) can have
-                # slightly different page widths from page to page. Each page's
-                # width was faithfully preserved through extraction/tiling, so
-                # the final PDF itself is structurally correct - but many mobile
-                # PDF readers render continuous-scroll view by padding narrower
-                # pages out to a common width, and default that padding to
-                # black rather than white. Centering each page on a common-width
-                # white canvas here removes any width variance for the reader
-                # to pad around, so no black bars/borders can appear.
+                # Normalize every page to the same width. Source PDFs (especially
+                # scraped manhwa/webtoon PDFs) can have slightly different page
+                # widths from page to page. Each page's width was faithfully
+                # preserved through extraction/tiling, so centering it on a
+                # common-width white canvas here removes any width variance that
+                # could otherwise show up as a visible edge once everything is
+                # joined into one continuous strip below.
                 target_width = max(im.width for im in pages)
                 normalized_pages = []
                 for im in pages:
@@ -2862,7 +2942,103 @@ def package_output(source_dir, job_root, file_idx, output_format):
                         normalized_pages.append(canvas)
                 pages = normalized_pages
 
-                pages[0].save(pdf_path, save_all=True, append_images=pages[1:])
+                # Join every page into ONE continuous vertical strip with a
+                # strict 0px gap between pages, so the reader scrolls through
+                # the whole chapter as a single uninterrupted webtoon image,
+                # with no hard page breaks or visual seams — regardless of how
+                # many pages/tiles/batches were used internally during
+                # translation. The single resulting image becomes the PDF's
+                # only page.
+                full_height = sum(im.height for im in pages)
+                full_strip = Image.new("RGB", (target_width, full_height), "white")
+                page_seam_ys = []
+                y = 0
+                for im in pages:
+                    full_strip.paste(im, (0, y))
+                    y += im.height
+                    if y < full_height:
+                        page_seam_ys.append(y)
+                    im.close()
+
+                # Feather the page-to-page joins the same way individual tile
+                # seams are already feathered above, since independently
+                # JPEG-compressed pages can otherwise show a faint line at
+                # each join even when the underlying cut was bubble-safe.
+                if page_seam_ys:
+                    import numpy as np
+                    FEATHER_PX = 6
+                    arr = np.asarray(full_strip).astype(np.float32)
+                    for seam_y in page_seam_ys:
+                        top = max(0, seam_y - FEATHER_PX)
+                        bottom = min(full_height, seam_y + FEATHER_PX)
+                        band = bottom - top
+                        if band <= 1:
+                            continue
+                        weights = np.linspace(0, 1, band, dtype=np.float32).reshape(-1, 1, 1)
+                        above_row = arr[max(0, seam_y - 1):seam_y, :, :]
+                        below_row = arr[seam_y:seam_y + 1, :, :]
+                        if above_row.shape[0] == 0 or below_row.shape[0] == 0:
+                            continue
+                        blended = above_row * (1 - weights) + below_row * weights
+                        arr[top:bottom, :, :] = blended
+                    full_strip = Image.fromarray(np.clip(arr, 0, 255).astype("uint8"), "RGB")
+
+                # Two independent size ceilings apply here:
+                #  1. PDF page size is capped by most readers at roughly 200in
+                #     (14,400pt) per dimension.
+                #  2. Pillow's PDF writer always re-encodes RGB images through
+                #     the JPEG encoder internally (regardless of the output
+                #     file being a .pdf), and JPEG hard-caps each pixel
+                #     dimension at 65,500px — a limit that a single long
+                #     webtoon strip can exceed on its own (e.g. a ~30-page
+                #     chapter of ~2200px-tall pages already clears it).
+                # (1) is handled by raising the saved DPI so the *reported*
+                # page size in points stays under the cap without touching
+                # pixel resolution. (2) can't be worked around via DPI at
+                # all — the pixel height itself must come under 65,500 before
+                # JPEG ever sees it — so if the full strip is too tall, it's
+                # split across multiple PDF pages purely for this encoder
+                # limit. Each split still uses 0px gap and preserves art:
+                # the split point is chosen at (or near) an already-existing
+                # page-to-page seam, so a split can never land in the middle
+                # of a single source page's content, let alone mid-bubble.
+                # In every normal-length chapter this loop runs once.
+                JPEG_MAX_DIM = 65500
+                SAFETY_MARGIN = 500  # stay comfortably clear of the hard 65,500px cap
+                MAX_STRIP_HEIGHT = JPEG_MAX_DIM - SAFETY_MARGIN
+
+                if full_height <= MAX_STRIP_HEIGHT:
+                    strips = [full_strip]
+                else:
+                    # Walk the existing page_seam_ys (boundaries between
+                    # original source pages) and cut the full strip into
+                    # <= MAX_STRIP_HEIGHT chunks at the seam closest to (but
+                    # not exceeding) each threshold, so every split falls
+                    # exactly on a page boundary rather than through a page.
+                    seam_candidates = [0] + page_seam_ys + [full_height]
+                    strips = []
+                    start_y = 0
+                    while start_y < full_height:
+                        limit = start_y + MAX_STRIP_HEIGHT
+                        if limit >= full_height:
+                            cut_y = full_height
+                        else:
+                            usable = [s for s in seam_candidates if start_y < s <= limit]
+                            cut_y = max(usable) if usable else limit
+                        strips.append(full_strip.crop((0, start_y, target_width, cut_y)))
+                        start_y = cut_y
+
+                MAX_PDF_POINTS = 14000  # stay safely under the ~14,400pt hard cap
+                tallest_strip = max(s.height for s in strips)
+                needed_dpi = int((tallest_strip / MAX_PDF_POINTS) * 72) + 1
+                save_dpi = max(72, needed_dpi)
+
+                strips[0].save(
+                    pdf_path,
+                    save_all=True,
+                    append_images=strips[1:],
+                    resolution=save_dpi,
+                )
                 return pdf_path
         except Exception as e:
             # Log the real reason instead of silently falling back - a swallowed

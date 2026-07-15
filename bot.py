@@ -2052,7 +2052,7 @@ def _stitch_group_vertically(input_dir, base_name, slice_files, cfg=None):
             pass
     return out_name
 
-def stitch_sliced_images(input_dir):
+def stitch_sliced_images(input_dir, cfg=None):
     all_files = [f for f in os.listdir(input_dir) if f.lower().endswith(IMAGE_EXTS)]
     groups = {}
     singles = []
@@ -2079,7 +2079,7 @@ def flatten_and_order(input_dir, content_type="manhwa", cfg=None):
             except Exception:
                 pass
 
-    stitch_sliced_images(input_dir)
+    stitch_sliced_images(input_dir, cfg=cfg)
 
     images = sorted([f for f in os.listdir(input_dir) if f.lower().endswith(IMAGE_EXTS)], key=_natural_key)
     ordered_map = {}

@@ -63,6 +63,13 @@ jobs:
           # because it's hardware-specific (CPU/CUDA/ROCm/MPS).
           pip install torch==2.11.0 torchvision==0.26.0 --extra-index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
+          # requirements.txt pulls in both opencv-python and opencv-contrib-python
+          # (different sub-deps ask for each). Having both installed together is a
+          # known source of native-level crashes/corruption in cv2, since they both
+          # ship a `cv2` module and can clobber each other's shared libs. Keep only
+          # contrib (superset of opencv-python) so there's a single consistent cv2.
+          pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python-headless
+          pip install --force-reinstall --no-deps opencv-contrib-python
           # Pillow: image stitching / tiling / PDF packaging
           # numpy: row-flatness analysis for safe-cut Manhwa tiling
           # PyMuPDF: pure-Python PDF page extraction (replaces pdftoppm)

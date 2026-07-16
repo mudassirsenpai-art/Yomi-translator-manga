@@ -80,6 +80,12 @@ MANHWA_TILE_MAX_CUTS = 10
 # widening the search (in tile_search_radius steps) instead of giving up.
 MANHWA_TILE_SEARCH_RADIUS_AUTO_MAX_EXTEND = 40
 
+# PDF page-gap stitching: when a PDF is uploaded, its pages can be joined into
+# one continuous vertical strip (like a manhwa) instead of staying separate.
+# This value is the gap (in px) drawn between consecutive pages. 0 = pages
+# butt up against each other with zero space, so no page-break line is visible.
+PDF_PAGE_GAP_DEFAULT_PX = 20
+
 DEFAULT_SYSTEM_PROMPT_NAME = "Default Localization Engine"
 DEFAULT_SYSTEM_PROMPT_TEXT = (
     "You are a professional multi-language manga and comic localization engine.\n"
@@ -133,6 +139,9 @@ def default_config():
         "system_prompt_text": DEFAULT_SYSTEM_PROMPT_TEXT,
         "user_prompt_name": DEFAULT_USER_PROMPT_NAME,
         "user_prompt_text": DEFAULT_USER_PROMPT_TEXT,
+
+        # PDF Page-Gap Stitching
+        "pdf_stitch_enabled": None, "pdf_page_gap_px": None,
 
         # Tiling Settings
         "tile_enabled": None, "tile_height": None, "tile_search_radius": None, 
@@ -294,6 +303,7 @@ def kb_main_menu(cfg=None):
         rows.append([InlineKeyboardButton("🎯 Detection Settings", callback_data="menu_detection")])
     if cfg is not None and cfg.get("content_type") == "manhwa":
         rows.append([InlineKeyboardButton("✂️ Tiling Settings", callback_data="menu_tiling")])
+    rows.append([InlineKeyboardButton("📄 PDF Page Gap", callback_data="menu_pdf_gap")])
     rows += [
         [InlineKeyboardButton("🧠 Generation Settings", callback_data="xf_group_generation")],
         [InlineKeyboardButton("🧹 Cleaning & Upscaling", callback_data="xf_group_cleaning")],
@@ -783,6 +793,31 @@ def kb_tile_bool_select(cfg, field):
         [InlineKeyboardButton(f"{mark(False)}Off", callback_data=f"tileboolset_{field}_off")],
         [InlineKeyboardButton(f"{'✅ ' if val is None else ''}Original/Default", callback_data=f"tileboolset_{field}_default")],
         [InlineKeyboardButton("🔙 Back", callback_data="menu_tiling")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+# ================= PDF Page-Gap Stitching Keyboards =================
+def kb_pdf_gap_menu(cfg):
+    enabled = cfg.get("pdf_stitch_enabled")
+    enabled_label = "Original/Default (Off — pages stay separate)" if enabled is None else ("✅ On" if enabled else "❌ Off")
+    gap = cfg.get("pdf_page_gap_px")
+    gap_label = f"Original/Default ({PDF_PAGE_GAP_DEFAULT_PX}px)" if gap is None else (f"{gap}px" + (" (seamless, no visible cut)" if gap == 0 else ""))
+    rows = [
+        [InlineKeyboardButton(f"🧵 Stitch Pages: {enabled_label}", callback_data="pdfgap_bool_pdf_stitch_enabled")],
+        [InlineKeyboardButton(f"↕️ Page Gap: {gap_label}", callback_data="pdfgap_field_pdf_page_gap_px")],
+        [InlineKeyboardButton("♻️ Reset to Original/Default", callback_data="pdfgap_reset_all")],
+        [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+def kb_pdf_gap_bool_select(cfg, field):
+    val = cfg.get(field)
+    def mark(v): return "✅ " if val == v else ""
+    rows = [
+        [InlineKeyboardButton(f"{mark(True)}On", callback_data=f"pdfgapboolset_{field}_on")],
+        [InlineKeyboardButton(f"{mark(False)}Off", callback_data=f"pdfgapboolset_{field}_off")],
+        [InlineKeyboardButton(f"{'✅ ' if val is None else ''}Original/Default", callback_data=f"pdfgapboolset_{field}_default")],
+        [InlineKeyboardButton("🔙 Back", callback_data="menu_pdf_gap")],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -1529,6 +1564,57 @@ async def handle_callbacks(client, query: CallbackQuery):
         )
         return
 
+    if data == "menu_pdf_gap":
+        await safe_edit(
+            query.message,
+            "📄 **PDF Page Gap**\n"
+            "When a PDF is uploaded, its pages can be joined into one continuous "
+            "vertical strip instead of staying as separate pages.\n\n"
+            "• **Stitch Pages**: turn stitching on/off.\n"
+            "• **Page Gap**: the blank space (in px) drawn between consecutive "
+            "pages in the joined strip. Set this to `0` and the pages butt up "
+            "directly against each other with no visible line where one page "
+            "ends and the next begins — just like a seamless manhwa/webtoon reader.\n\n"
+            "_\"Original/Default\" = stitching off, pages stay separate exactly like before this menu existed._",
+            reply_markup=kb_pdf_gap_menu(cfg)
+        )
+        return
+
+    if data == "pdfgap_bool_pdf_stitch_enabled":
+        await safe_edit(query.message, "🧵 **Stitch PDF Pages:**", reply_markup=kb_pdf_gap_bool_select(cfg, "pdf_stitch_enabled"))
+        return
+
+    if data.startswith("pdfgapboolset_"):
+        rest = data[len("pdfgapboolset_"):]
+        field, choice = rest.rsplit("_", 1)
+        cfg[field] = None if choice == "default" else (choice == "on")
+        await save_user_config(user_id)
+        await safe_answer(query, "Updated")
+        await safe_edit(query.message, "🧵 **Stitch PDF Pages:**", reply_markup=kb_pdf_gap_bool_select(cfg, field))
+        return
+
+    if data == "pdfgap_field_pdf_page_gap_px":
+        awaiting_reply[user_id] = {"type": "pdf_gap_field", "extra": {"field": "pdf_page_gap_px"}}
+        await safe_edit(
+            query.message,
+            "✍️ **Reply to this message with the new Page Gap (px)** — a whole number, e.g. `20`.\n"
+            "Reply with `0` for a seamless join (no visible page break).\n"
+            "Reply with `default` to reset to Original/Default."
+        )
+        return
+
+    if data == "pdfgap_reset_all":
+        cfg["pdf_stitch_enabled"] = None
+        cfg["pdf_page_gap_px"] = None
+        await save_user_config(user_id)
+        await safe_answer(query, "PDF Page Gap settings reset to Original/Default")
+        await safe_edit(
+            query.message,
+            "📄 **PDF Page Gap**\nAll settings reset to Original/Default.",
+            reply_markup=kb_pdf_gap_menu(cfg)
+        )
+        return
+
     if data == "menu_backup":
         await safe_edit(
             query.message,
@@ -1919,6 +2005,31 @@ async def handle_reply_capture(client, message: Message):
         await message.reply_text(f"✅ {pretty} set to `{value}`.", reply_markup=kb_tiling_menu(cfg))
         return
 
+    if kind == "pdf_gap_field":
+        field = pending_reply["extra"]["field"]
+
+        if text.lower() == "default":
+            cfg[field] = None
+            await save_user_config(user_id)
+            awaiting_reply.pop(user_id, None)
+            await message.reply_text("✅ Page Gap reset to Original/Default.", reply_markup=kb_pdf_gap_menu(cfg))
+            return
+
+        try:
+            value = int(text)
+            if value < 0:
+                raise ValueError
+        except ValueError:
+            await message.reply_text("❌ Please reply with a whole number `0` or greater (e.g. `0` or `20`), or `default` to reset. Try again.")
+            return
+
+        cfg[field] = value
+        await save_user_config(user_id)
+        awaiting_reply.pop(user_id, None)
+        note = " (seamless — no visible page break)" if value == 0 else ""
+        await message.reply_text(f"✅ Page Gap set to `{value}px`{note}.", reply_markup=kb_pdf_gap_menu(cfg))
+        return
+
     if kind == "prompt_name":
         prompt_kind = pending_reply["extra"]["kind"]
         if len(text) > PROMPT_NAME_MAX_LEN:
@@ -1988,18 +2099,65 @@ def extract_archive(path, dest_dir):
     with zipfile.ZipFile(path, 'r') as zip_ref:
         zip_ref.extractall(dest_dir)
 
-def extract_pdf(path, dest_dir):
-    import fitz  
-    zoom = 200 / 72  
+def extract_pdf(path, dest_dir, cfg=None):
+    import fitz
+    zoom = 200 / 72
     mat = fitz.Matrix(zoom, zoom)
     doc = fitz.open(path)
     try:
+        page_paths = []
         for i, page in enumerate(doc, start=1):
             pix = page.get_pixmap(matrix=mat, alpha=False)
             out_path = os.path.join(dest_dir, f"page_{i:03d}.jpg")
             pix.save(out_path)
+            page_paths.append(out_path)
     finally:
         doc.close()
+
+    cfg = cfg or {}
+    if cfg.get("pdf_stitch_enabled"):
+        _stitch_pdf_pages(page_paths, dest_dir, cfg)
+
+
+def _stitch_pdf_pages(page_paths, dest_dir, cfg):
+    """
+    Joins all extracted PDF pages into a single continuous vertical strip,
+    with `pdf_page_gap_px` blank pixels of gap between consecutive pages.
+    A gap of 0 means pages butt up directly against each other with zero
+    space, so no visible line marks where one page ends and the next begins
+    — the same effect as a seamless manhwa/webtoon-style long strip.
+    """
+    from PIL import Image
+
+    gap = cfg.get("pdf_page_gap_px")
+    if gap is None:
+        gap = PDF_PAGE_GAP_DEFAULT_PX
+    gap = max(0, int(gap))
+
+    if not page_paths:
+        return
+
+    imgs = [Image.open(p).convert("RGB") for p in page_paths]
+    total_width = max(im.width for im in imgs)
+    total_height = sum(im.height for im in imgs) + gap * (len(imgs) - 1)
+
+    strip = Image.new("RGB", (total_width, total_height), (255, 255, 255))
+    y_offset = 0
+    for im in imgs:
+        x_offset = (total_width - im.width) // 2
+        strip.paste(im, (x_offset, y_offset))
+        y_offset += im.height + gap
+
+    for im in imgs:
+        im.close()
+    for p in page_paths:
+        try:
+            os.remove(p)
+        except Exception:
+            pass
+
+    strip_path = os.path.join(dest_dir, "page_001.jpg")
+    strip.save(strip_path, quality=95)
 
 IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.webp')
 
@@ -2452,7 +2610,7 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
         if mode == "archive" or downloaded_path.lower().endswith(('.zip', '.cbz')):
             extract_archive(downloaded_path, input_dir)
         elif mode == "pdf" or downloaded_path.lower().endswith('.pdf'):
-            extract_pdf(downloaded_path, input_dir)
+            extract_pdf(downloaded_path, input_dir, cfg=cfg)
         else:
             shutil.move(downloaded_path, os.path.join(input_dir, os.path.basename(downloaded_path)))
 

@@ -2110,6 +2110,7 @@ def extract_pdf(path, dest_dir, cfg=None):
             pix = page.get_pixmap(matrix=mat, alpha=False)
             out_path = os.path.join(dest_dir, f"page_{i:03d}.jpg")
             pix.save(out_path)
+            pix = None  # release the pixmap explicitly before the next page
             page_paths.append(out_path)
     finally:
         doc.close()
@@ -2127,7 +2128,13 @@ def _stitch_pdf_pages(page_paths, dest_dir, cfg):
     space, so no visible line marks where one page ends and the next begins
     — the same effect as a seamless manhwa/webtoon-style long strip.
     """
-    from PIL import Image
+    from PIL import Image, ImageFile
+
+    # Some PDF renders can produce a JPEG that's technically valid but hits
+    # Pillow's strict decoder edge cases ("broken data stream when writing
+    # image file") on save. This tells Pillow to tolerate/repair truncated
+    # data instead of throwing mid-write.
+    ImageFile.LOAD_TRUNCATED_IMAGES = True
 
     gap = cfg.get("pdf_page_gap_px")
     if gap is None:
@@ -2137,7 +2144,24 @@ def _stitch_pdf_pages(page_paths, dest_dir, cfg):
     if not page_paths:
         return
 
-    imgs = [Image.open(p).convert("RGB") for p in page_paths]
+    imgs = []
+    bad_pages = []
+    for p in page_paths:
+        try:
+            im = Image.open(p)
+            im.load()  # force full decode now, so a bad file fails HERE with
+                       # a clear page reference, not later during paste/save
+            im = im.convert("RGB")
+            imgs.append(im)
+        except Exception as e:
+            bad_pages.append((os.path.basename(p), str(e)))
+
+    if not imgs:
+        raise RuntimeError(
+            f"PDF stitching failed: none of {len(page_paths)} extracted page(s) "
+            f"could be read. First error: {bad_pages[0] if bad_pages else 'unknown'}"
+        )
+
     total_width = max(im.width for im in imgs)
     total_height = sum(im.height for im in imgs) + gap * (len(imgs) - 1)
 
@@ -2157,7 +2181,17 @@ def _stitch_pdf_pages(page_paths, dest_dir, cfg):
             pass
 
     strip_path = os.path.join(dest_dir, "page_001.jpg")
-    strip.save(strip_path, quality=95)
+    try:
+        strip.save(strip_path, format="JPEG", quality=95)
+    except OSError:
+        # Fallback: some giant strips trip JPEG's internal block-size limits.
+        # PNG has no such limit, so retry losslessly instead of failing the job.
+        strip_path = os.path.join(dest_dir, "page_001.png")
+        strip.save(strip_path, format="PNG")
+
+    if bad_pages:
+        skipped = ", ".join(name for name, _ in bad_pages)
+        print(f"⚠️ PDF stitching: skipped {len(bad_pages)} unreadable page(s): {skipped}")
 
 IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.webp')
 
@@ -2607,12 +2641,21 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             downloaded_path = fixed_path
 
         await safe_edit(status_msg, build_status_text(mode_label, "📂 Extracting", file_idx, total_files, 0, 0, 15))
-        if mode == "archive" or downloaded_path.lower().endswith(('.zip', '.cbz')):
-            extract_archive(downloaded_path, input_dir)
-        elif mode == "pdf" or downloaded_path.lower().endswith('.pdf'):
-            extract_pdf(downloaded_path, input_dir, cfg=cfg)
-        else:
-            shutil.move(downloaded_path, os.path.join(input_dir, os.path.basename(downloaded_path)))
+        try:
+            if mode == "archive" or downloaded_path.lower().endswith(('.zip', '.cbz')):
+                extract_archive(downloaded_path, input_dir)
+            elif mode == "pdf" or downloaded_path.lower().endswith('.pdf'):
+                extract_pdf(downloaded_path, input_dir, cfg=cfg)
+            else:
+                shutil.move(downloaded_path, os.path.join(input_dir, os.path.basename(downloaded_path)))
+        except Exception as extract_err:
+            failure_reasons.append((file_idx, f"Extraction failed: {extract_err}"))
+            await safe_edit(
+                status_msg,
+                f"❌ **File {file_idx}/{total_files} failed during extraction.**\n"
+                f"```\n{extract_err}\n```\nSkipping to next file."
+            )
+            continue
 
         ordered_map, tile_manifest = flatten_and_order(input_dir, content_type=cfg.get("content_type", "manhwa"), cfg=cfg)
         total_images = len(ordered_map)

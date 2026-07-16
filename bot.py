@@ -11,6 +11,17 @@ from pathlib import Path
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
 
+# Pillow's default decompression-bomb guard (~178M px, meant for untrusted
+# images from the internet) is too low for this bot's own use: PDF pages
+# rendered at 200 DPI and stitched into one tall strip, or large raw manga
+# pages, routinely exceed it and would otherwise crash with
+# "DecompressionBombError" on perfectly legitimate chapters. Every image
+# here originates from the user's own upload or our own PyMuPDF render, so
+# we raise the cap globally (once, at import time, before any Image.open
+# call anywhere in the file) rather than disabling the check outright.
+from PIL import Image as _PILImage
+_PILImage.MAX_IMAGE_PIXELS = 2_000_000_000  # ~2 billion px (~8GB as RGB)
+
 # ================= Configuration & Secrets =================
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
@@ -2135,6 +2146,8 @@ def _stitch_pdf_pages(page_paths, dest_dir, cfg):
     # image file") on save. This tells Pillow to tolerate/repair truncated
     # data instead of throwing mid-write.
     ImageFile.LOAD_TRUNCATED_IMAGES = True
+    # (Image.MAX_IMAGE_PIXELS is raised globally at module import time,
+    # so the stitched strip's pixel count won't trip Pillow's bomb guard.)
 
     gap = cfg.get("pdf_page_gap_px")
     if gap is None:

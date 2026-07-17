@@ -1,0 +1,21 @@
+{
+  "name": "Yomi Manga Translator Bot",
+  "image": "mcr.microsoft.com/devcontainers/python:3.10",
+
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {}
+  },
+
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+
+  "postStartCommand": "bash .devcontainer/start-bot.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python", "ms-python.vscode-pylance"]
+    }
+  },
+
+  // Bot runs long-lived (polling Telegram) - keep container from idling out too fast.
+  "remoteUser": "vscode"
+}

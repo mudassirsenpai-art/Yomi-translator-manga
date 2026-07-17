@@ -7,8 +7,11 @@ on:
     paths:
       - "bot.py"
       - ".github/workflows/manga-bot.yml"
-  schedule:
-    - cron: "0 */5 * * *"
+  # schedule trigger removed: running on a cron alongside a Codespaces
+  # instance causes two processes polling the same BOT_TOKEN's getUpdates
+  # at once, which Telegram rejects with a conflict error. Use
+  # workflow_dispatch (manual "Run workflow" button) if you need Actions
+  # to run it on demand instead.
 
 concurrency:
   group: manga-bot-service

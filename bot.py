@@ -8,6 +8,17 @@ import asyncio
 import subprocess
 import io
 from pathlib import Path
+
+# Tall manhwa/webtoon strips (and recomposed tiled pages) routinely exceed
+# PIL's default DecompressionBombWarning/Error threshold (~89 megapixels).
+# This is expected for this bot's use case, not an actual decompression-bomb
+# attack, so raise the ceiling instead of letting PIL warn/crash on
+# legitimate large pages. Setting it here (before any PIL.Image import)
+# ensures every `from PIL import Image` elsewhere in this file inherits it,
+# since PIL.Image.MAX_IMAGE_PIXELS is a module-level attribute.
+from PIL import Image as _PILImage
+_PILImage.MAX_IMAGE_PIXELS = None  # disable the pixel-count safety limit entirely
+
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
 
@@ -2503,6 +2514,17 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
         subprocess_env['PROVIDER'] = cfg['provider']
         subprocess_env['API_URL'] = cfg['api_url']
         subprocess_env['API_KEY'] = cfg['api_key']
+        # Tall manhwa/webtoon pages (and their recomposed tiles) routinely exceed
+        # PIL's default ~89-megapixel DecompressionBombWarning threshold. This is
+        # expected content for this bot, not an actual attack, so silence the
+        # warning in the MangaTranslator subprocess rather than letting it spam
+        # stderr (and risk a hard DecompressionBombError on very tall strips).
+        # This is a separate process from bot.py, so it needs its own override;
+        # PYTHONWARNINGS covers the warning path for any script that doesn't
+        # already set PIL's MAX_IMAGE_PIXELS itself.
+        subprocess_env['PYTHONWARNINGS'] = subprocess_env.get('PYTHONWARNINGS', '') + \
+            (',' if subprocess_env.get('PYTHONWARNINGS') else '') + \
+            'ignore::PIL.Image.DecompressionBombWarning'
         subprocess_env['MODEL_NAME'] = cfg['model_name']
         subprocess_env['SPECIAL_INS'] = dynamic_system_instruction
 

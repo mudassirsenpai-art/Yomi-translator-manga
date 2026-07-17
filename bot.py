@@ -2237,7 +2237,7 @@ def _seam_looks_duplicated(recomposed_im, seam_y, band_px=SEAM_CHECK_BAND_PX, di
     diff = np.abs(upper_band - lower_band).mean()
     return diff < diff_threshold
 
-def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None, input_dir=None):
+def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None):
     from PIL import Image
     cfg = cfg or {}
     seam_band_px = cfg.get("tile_seam_band_px") or SEAM_CHECK_BAND_PX
@@ -2249,14 +2249,14 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None, inp
     total_height = manifest_entry["original_height"]
     forced_cut_rows = set(manifest_entry.get("forced_cut_rows", []))
 
-    # For each tile, use the translated version if the engine produced one.
-    # If a tile failed to translate (engine crashed/skipped it), fall back to
-    # the original (untranslated) source tile instead of dropping the whole
-    # page. This guarantees every page still makes it into the final output —
-    # worst case a tile is left untranslated, instead of the whole page
-    # vanishing from the output.
-    tile_paths = []
-    missing_tiles = []
+    # Collect ALL tile paths that exist on disk for this page up front, so that
+    # even on a partial-failure path (some tile never got translated) we can
+    # still clean up the tiles that DID make it - otherwise they're left behind
+    # in translated_dir as loose images and get swept into produced_files,
+    # causing the same page to appear twice (once as a leftover tile, once
+    # wherever it resurfaces) in the final PDF/CBZ output.
+    found_paths = []
+    missing = False
     for tile_name in tiles:
         stem = os.path.splitext(tile_name)[0]
         found = None
@@ -2265,54 +2265,60 @@ def recompose_tiled_page(translated_dir, page_idx, manifest_entry, cfg=None, inp
             if os.path.exists(candidate):
                 found = candidate
                 break
-        if found is None and input_dir:
-            for ext in IMAGE_EXTS:
-                candidate = os.path.join(input_dir, stem + ext)
-                if os.path.exists(candidate):
-                    found = candidate
-                    break
-            if found is not None:
-                missing_tiles.append(tile_name)
         if found is None:
-            missing_tiles.append(tile_name)
-        tile_paths.append(found)
+            missing = True
+        else:
+            found_paths.append(found)
 
-    recomposed = Image.new("RGB", (width, total_height), (255, 255, 255))
-    seam_ys = []  
-    y_cursor = 0
-    for i, tile_path in enumerate(tile_paths):
-        if tile_path is not None:
+    if missing:
+        # Incomplete tile set for this page - can't safely recompose. Remove
+        # whatever tiles DID get translated so they don't leak into the output
+        # as stray extra images, then bail.
+        for p in found_paths:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+        return None
+
+    translated_tile_paths = found_paths
+
+    try:
+        recomposed = Image.new("RGB", (width, total_height), (255, 255, 255))
+        seam_ys = []
+        y_cursor = 0
+        for i, tile_path in enumerate(translated_tile_paths):
             with Image.open(tile_path) as tile_im:
                 tile_im = tile_im.convert("RGB")
                 if tile_im.size != (width, heights[i]):
                     tile_im = tile_im.resize((width, heights[i]))
                 recomposed.paste(tile_im, (0, y_cursor))
-        y_cursor += heights[i]
-        if i < len(tile_paths) - 1:
-            seam_ys.append(y_cursor)
+                y_cursor += tile_im.height
+                if i < len(translated_tile_paths) - 1:
+                    seam_ys.append(y_cursor)
 
-    # Check every seam for duplicated/misaligned content, not just seams that were
-    # forced through non-flat rows. Even a "safe" flat-row cut can look duplicated
-    # after inpainting/redrawing shifts art slightly, so this can't be skipped —
-    # forced cuts just get a slightly wider tolerance since they're higher-risk.
-    flagged_seams = []
-    for seam_y in seam_ys:
-        was_forced = any(abs(seam_y - forced_y) <= 2 for forced_y in forced_cut_rows)
-        effective_threshold = seam_diff_threshold * (1.4 if was_forced else 1.0)
-        if _seam_looks_duplicated(recomposed, seam_y, band_px=seam_band_px, diff_threshold=effective_threshold):
-            flagged_seams.append(seam_y)
+        flagged_seams = []
+        for seam_y in seam_ys:
+            was_forced = any(abs(seam_y - forced_y) <= 2 for forced_y in forced_cut_rows)
+            effective_threshold = seam_diff_threshold * (1.4 if was_forced else 1.0)
+            if _seam_looks_duplicated(recomposed, seam_y, band_px=seam_band_px, diff_threshold=effective_threshold):
+                flagged_seams.append(seam_y)
 
-    out_name = manifest_entry["original_name"]
-    out_path = os.path.join(translated_dir, out_name)
-    recomposed.save(out_path, quality=95)
-    for p in tile_paths:
-        if p is None:
-            continue
-        try:
-            os.remove(p)
-        except Exception:
-            pass
-    return (out_path, flagged_seams, missing_tiles)
+        out_name = manifest_entry["original_name"]
+        out_path = os.path.join(translated_dir, out_name)
+        recomposed.save(out_path, quality=95)
+    finally:
+        # ALWAYS remove the source tiles, even if recompose raised partway
+        # through (corrupt tile image, resize failure, disk error, etc).
+        # Leaving them behind means they get picked up as loose "extra"
+        # images later and the page effectively appears twice in the
+        # final PDF/CBZ/ZIP.
+        for p in translated_tile_paths:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+    return (out_path, flagged_seams)
 
 def build_dynamic_system_instruction(cfg):
     system_text = cfg["system_prompt_text"].replace("{target_lang}", cfg["target_lang"])
@@ -2616,33 +2622,28 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
         if tile_manifest:
             await safe_edit(status_msg, build_status_text(mode_label, "🧵 Recomposing tiled pages", file_idx, total_files, total_images, total_images, 85))
             recompose_failures = []
-            partial_pages = []
             duplicate_suspected_pages = []
             for page_idx, manifest_entry in tile_manifest.items():
-                result = recompose_tiled_page(file_translated_dir, page_idx, manifest_entry, cfg=cfg, input_dir=input_dir)
+                try:
+                    result = recompose_tiled_page(file_translated_dir, page_idx, manifest_entry, cfg=cfg)
+                except Exception:
+                    # recompose_tiled_page already cleans up its own tiles
+                    # in a finally block even on error, so this just needs
+                    # to record the failure and keep going instead of
+                    # letting one bad page kill the whole file.
+                    result = None
                 if result is None:
                     recompose_failures.append(page_idx)
                     continue
-                result_path, flagged_seams, missing_tiles = result
-                if missing_tiles:
-                    partial_pages.append(page_idx)
+                result_path, flagged_seams = result
                 if flagged_seams:
                     duplicate_suspected_pages.append(page_idx)
             if recompose_failures:
                 await safe_edit(
                     status_msg,
                     f"⚠️ File {file_idx}/{total_files}: {len(recompose_failures)} tiled page(s) "
-                    f"could not be recomposed at all and were skipped. "
+                    f"had a tile that failed to translate, so those pages may be incomplete. "
                     f"Continuing with the rest."
-                )
-            if partial_pages:
-                pages_list = ", ".join(str(p) for p in partial_pages)
-                await safe_edit(
-                    status_msg,
-                    f"⚠️ File {file_idx}/{total_files}: {len(partial_pages)} tiled page(s) "
-                    f"had a tile that failed to translate — those pages were still included "
-                    f"in the output, but with that section left untranslated "
-                    f"(page(s) {pages_list}). Continuing with the rest."
                 )
             if duplicate_suspected_pages:
                 pages_list = ", ".join(str(p) for p in duplicate_suspected_pages)

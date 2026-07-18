@@ -161,6 +161,9 @@ def default_config():
         "seg_model": None, "conjoined_detection": None, "bubble_detector_model": None,
         "ocr_method": None, "osb_enabled": True,
 
+        # Gemma vision pre-pass (separate from main OCR/translation provider)
+        "gemma_enabled": False, "gemma_api_url": "", "gemma_api_key": "", "gemma_model_name": "",
+
         # ALL OTHER main.py flags mapped for JSON Import/Export
         "temperature": None, "top_p": None, "top_k": None, "max_tokens": None,
         "translation_mode": None, "reasoning_effort": None, "effort": None, 
@@ -314,6 +317,7 @@ def kb_main_menu(cfg=None):
         rows.append([InlineKeyboardButton("🫧 OSB Tuning", callback_data="xf_group_osb")])
     rows += [
         [InlineKeyboardButton("⚙️ Provider & API", callback_data="menu_api")],
+        [InlineKeyboardButton("🔍 Vision Model (Gemma)", callback_data="menu_gemma")],
         [InlineKeyboardButton("📝 Prompt Library", callback_data="menu_prompt")],
         [InlineKeyboardButton("📦 Output Format", callback_data="menu_output")],
         [InlineKeyboardButton("💾 Backup (Import/Export JSON)", callback_data="menu_backup")],
@@ -806,6 +810,16 @@ def kb_api_menu(cfg):
         [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")],
     ])
 
+def kb_gemma_menu(cfg):
+    gemma_mark = "✅ " if cfg.get("gemma_enabled", False) else "❌ "
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{gemma_mark}Vision Pre-Pass: {'ON' if cfg.get('gemma_enabled', False) else 'OFF'}", callback_data="gemma_toggle")],
+        [InlineKeyboardButton(f"Base URL: {cfg.get('gemma_api_url') or 'not set'}", callback_data="gemma_field_gemma_api_url")],
+        [InlineKeyboardButton("API Key: " + ("••••••" if cfg.get('gemma_api_key') else "not set"), callback_data="gemma_field_gemma_api_key")],
+        [InlineKeyboardButton(f"Model ID: {cfg.get('gemma_model_name') or 'not set'}", callback_data="gemma_field_gemma_model_name")],
+        [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")],
+    ])
+
 def kb_provider_select(cfg):
     rows = []
     for p in PROVIDERS:
@@ -1160,6 +1174,39 @@ async def handle_callbacks(client, query: CallbackQuery):
             "⚙️ **Provider & API Configuration**",
             reply_markup=kb_api_menu(cfg)
         )
+        return
+
+    if data == "menu_gemma":
+        await safe_edit(
+            query.message,
+            "🔍 **Vision Model (Gemma) Pre-Pass**\n"
+            "When ON, a vision model roughly locates speech bubbles/text on the "
+            "page first, and YOLO is then restricted to just those regions "
+            "(reduces false detections from panel art/speed lines). "
+            "When OFF, YOLO scans the full page as usual.\n\n"
+            "This is a separate model/key from your main OCR & Translation "
+            "provider above \u2014 configure it here.",
+            reply_markup=kb_gemma_menu(cfg)
+        )
+        return
+
+    if data == "gemma_toggle":
+        cfg["gemma_enabled"] = not cfg.get("gemma_enabled", False)
+        await save_user_config(user_id)
+        state = "ON" if cfg["gemma_enabled"] else "OFF"
+        await safe_answer(query, f"Gemma vision pre-pass turned {state}")
+        await safe_edit(query.message, "🔍 **Vision Model (Gemma) Pre-Pass**", reply_markup=kb_gemma_menu(cfg))
+        return
+
+    if data.startswith("gemma_field_"):
+        field = data.split("gemma_field_", 1)[1]
+        pretty = {
+            "gemma_api_url": "Base URL",
+            "gemma_api_key": "API Key",
+            "gemma_model_name": "Model ID",
+        }.get(field, field)
+        awaiting_reply[user_id] = {"type": "gemma_field", "extra": {"field": field}}
+        await safe_edit(query.message, f"✍️ **Reply to this message with the new {pretty} (Vision Model).**")
         return
 
     if data == "api_provider_open":
@@ -1740,6 +1787,19 @@ async def handle_reply_capture(client, message: Message):
         awaiting_reply.pop(user_id, None)
         pretty = {"api_url": "Base URL", "api_key": "API Key", "model_name": "Model ID"}.get(field, field)
         await message.reply_text(f"✅ {pretty} updated.", reply_markup=kb_api_menu(cfg))
+        return
+
+    if kind == "gemma_field":
+        field = pending_reply["extra"]["field"]
+        cfg[field] = text
+        await save_user_config(user_id)
+        awaiting_reply.pop(user_id, None)
+        pretty = {
+            "gemma_api_url": "Base URL",
+            "gemma_api_key": "API Key",
+            "gemma_model_name": "Model ID",
+        }.get(field, field)
+        await message.reply_text(f"✅ {pretty} (Vision Model) updated.", reply_markup=kb_gemma_menu(cfg))
         return
 
     if kind == "appear_field":
@@ -2404,7 +2464,9 @@ CLI_MAPPINGS = {
     "osb_render_expansion_area_threshold": ("--osb-render-expansion-area-threshold", "val"), "osb_text_box_proximity_ratio": ("--osb-text-box-proximity-ratio", "val"),
     "osb_confidence": ("--osb-confidence", "val"), "osb_filter_page_numbers": ("--osb-filter-page-numbers", "bool_true"),
     "osb_page_filter_margin": ("--osb-page-filter-margin", "val"), "osb_page_filter_min_area": ("--osb-page-filter-min-area", "val"),
-    "osb_min_area_ignore_ratio": ("--osb-min-area-ignore-ratio", "val"), "osb_min_side_pixels": ("--osb-min-side-pixels", "val")
+    "osb_min_area_ignore_ratio": ("--osb-min-area-ignore-ratio", "val"), "osb_min_side_pixels": ("--osb-min-side-pixels", "val"),
+    "gemma_enabled": ("--gemma-enabled", "bool_true"), "gemma_api_url": ("--gemma-api-url", "val"),
+    "gemma_api_key": ("--gemma-api-key", "val"), "gemma_model_name": ("--gemma-model-name", "val"),
 }
 
 # ================= Main Pipeline Runner =================

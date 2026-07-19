@@ -66,11 +66,44 @@ jobs:
           # PyTorch must be installed explicitly - it is NOT in requirements.txt
           # because it's hardware-specific (CPU/CUDA/ROCm/MPS).
           pip install torch==2.11.0 torchvision==0.26.0 --extra-index-url https://download.pytorch.org/whl/cpu
-          # requirements.txt now also pulls in surya-ocr (pinned pre-"Surya 2",
-          # pure-torch, no server backend) and paddleocr (classic PP-OCRv4,
-          # NOT the paddleocr-vl-1.6 VLM) for the surya-ocr / paddleocr-classic
-          # OCR methods.
+          # requirements.txt also pulls in paddleocr (classic PP-OCRv4, NOT the
+          # paddleocr-vl-1.6 VLM) for the paddleocr-classic OCR method.
+          # surya-ocr is deliberately NOT in requirements.txt - see the comment
+          # there for why - and is installed separately right below instead.
           pip install -r requirements.txt
+          # --- surya-ocr: pinned pre-"Surya 2" (pure-torch, no server backend), ---
+          # --- installed with --no-deps to avoid its permanent pillow<11.0.0  ---
+          # --- pin conflicting with this project's pillow>=11.1.0.           ---
+          # 1) Install surya-ocr itself with no dependency resolution at all,
+          #    so pip never has to reconcile its pillow pin against ours.
+          pip install --no-deps "surya-ocr>=0.14.0,<0.18.0"
+          # 2) Ask pip what surya-ocr actually declares as its dependencies
+          #    (via `pip show`), strip out pillow (already satisfied at a
+          #    newer, incompatible-on-paper version) and torch/torchvision
+          #    (already installed above, hardware-specific), then install
+          #    the rest normally. This derives the list from the real
+          #    installed package's metadata instead of a hand-maintained
+          #    guess, so it stays correct if surya-ocr's deps change.
+          SURYA_DEPS=$(pip show surya-ocr | sed -n 's/^Requires: //p' | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -viE '^(pillow|torch|torchvision)$')
+          if [ -n "$SURYA_DEPS" ]; then
+            echo "Installing surya-ocr's remaining declared deps:"
+            echo "$SURYA_DEPS"
+            pip install $SURYA_DEPS
+          fi
+          # 3) Re-assert pillow>=11.1.0 in case any of the above quietly
+          #    pulled in an older pillow as a transitive dep of one of
+          #    surya-ocr's own deps (e.g. via a sub-dependency's own pin).
+          pip install "pillow>=11.1.0"
+          # 4) Fail fast, here, if pillow ended up on an incompatible version -
+          #    better to break at this step with a clear message than to have
+          #    surya-ocr fail obscurely at import time in "Verify Core Imports".
+          python -c "
+from importlib.metadata import version
+from packaging.version import Version
+v = Version(version('pillow'))
+assert v >= Version('11.1.0'), f'pillow got downgraded to {v}, expected >=11.1.0'
+print(f'pillow {v} OK')
+"
           # PaddlePaddle (CPU build) is required by both the paddleocr-vl-1.6
           # (VLM) OCR method and the classic paddleocr package pulled in above
           # (paddleocr-classic method). Like torch, it's hardware-specific and

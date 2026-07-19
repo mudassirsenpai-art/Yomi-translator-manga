@@ -75,6 +75,43 @@ jobs:
         run: |
           python -c "import fitz; import PIL; import numpy; import pyrogram; import tgcrypto; print('core imports OK')"
 
+      - name: Pre-download Local OCR Models
+        timeout-minutes: 20
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          # Manual Translation Mode's local OCR options (manga-ocr / paddleocr-vl-1.6)
+          # download their weights from HF Hub on first use inside the bot's own
+          # (effectively infinite) polling process. If that download stalls or is
+          # slow, it looks exactly like the bot "hanging" at 40% with no visible
+          # progress or way to tell download-in-progress from a genuine freeze.
+          #
+          # Downloading here instead, as its own step with an explicit timeout,
+          # means: (a) progress/errors show up in this step's own log instead of
+          # being buried in the bot's live log, and (b) if HF is slow/unreachable
+          # the workflow fails fast here with a clear timeout instead of the bot
+          # process just sitting at some OCR percentage forever.
+          #
+          # local_dir targets below match core/ml/model_manager.py's own
+          # model_paths (./models/manga-ocr-base and ./models/paddleocr-vl-1.6)
+          # exactly, so the bot's _ensure_hf_repo() sees the weights already
+          # present and skips re-downloading them at runtime.
+          cd MangaTranslator
+          pip install "huggingface_hub[cli]"
+          python -c "
+          from huggingface_hub import snapshot_download
+
+          targets = [
+              ('kha-white/manga-ocr-base', './models/manga-ocr-base'),
+              ('PaddlePaddle/PaddleOCR-VL-1.6', './models/paddleocr-vl-1.6'),
+          ]
+          for repo_id, local_dir in targets:
+              print(f'Pre-downloading {repo_id} -> {local_dir} ...', flush=True)
+              snapshot_download(repo_id=repo_id, local_dir=local_dir)
+              print(f'{repo_id} ready.', flush=True)
+          "
+
       - name: Run Telegram Bot
         env:
           API_ID: ${{ secrets.API_ID }}

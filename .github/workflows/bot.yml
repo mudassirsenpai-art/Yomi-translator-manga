@@ -97,13 +97,7 @@ jobs:
           # 4) Fail fast, here, if pillow ended up on an incompatible version -
           #    better to break at this step with a clear message than to have
           #    surya-ocr fail obscurely at import time in "Verify Core Imports".
-          python -c "
-from importlib.metadata import version
-from packaging.version import Version
-v = Version(version('pillow'))
-assert v >= Version('11.1.0'), f'pillow got downgraded to {v}, expected >=11.1.0'
-print(f'pillow {v} OK')
-"
+          python -c "from importlib.metadata import version; from packaging.version import Version; v = Version(version('pillow')); assert v >= Version('11.1.0'), f'pillow got downgraded to {v}, expected >=11.1.0'; print(f'pillow {v} OK')"
           # PaddlePaddle (CPU build) is required by both the paddleocr-vl-1.6
           # (VLM) OCR method and the classic paddleocr package pulled in above
           # (paddleocr-classic method). Like torch, it's hardware-specific and

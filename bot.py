@@ -2510,6 +2510,11 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
         dynamic_system_instruction = build_dynamic_system_instruction(cfg)
 
         subprocess_env = os.environ.copy()
+        # Without this, Python fully buffers stdout/stderr when they're piped
+        # (as they are below), so nothing reaches the Actions log until the
+        # process exits - making a stuck/slow run look totally silent even
+        # though it may be printing progress internally.
+        subprocess_env['PYTHONUNBUFFERED'] = '1'
         subprocess_env['INPUT_LANG'] = cfg['source_lang']
         subprocess_env['PROVIDER'] = cfg['provider']
         subprocess_env['API_URL'] = cfg['api_url']
@@ -2581,41 +2586,99 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             reply_markup=kb_cancel_only()
         )
 
+        # Per-file stall timeout: local OCR paths (manga-ocr / paddleocr-vl)
+        # can silently hang on a CPU-only Actions runner (slow/rate-limited HF
+        # weight download on first use, or just very slow CPU inference on a
+        # VLM like PaddleOCR-VL). Without a ceiling here, a single stuck image
+        # hangs the whole job forever with no feedback. This does NOT assume
+        # the model is broken - it just guarantees the job fails loudly with
+        # real log context instead of hanging silently.
+        STALL_TIMEOUT_SECONDS = int(os.environ.get("ENGINE_STALL_TIMEOUT", "900"))  # 15 min default
+
+        recent_lines = []  # rolling tail of live output, for the timeout/error report
+        MAX_RECENT_LINES = 60
+
+        async def _stream_reader(stream, label):
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                text = line.decode(errors="replace").rstrip("\n")
+                # Print immediately (unbuffered) so it actually shows up live
+                # in the Actions log instead of only after the process exits.
+                print(f"[{label}] {text}", flush=True)
+                recent_lines.append(text)
+                if len(recent_lines) > MAX_RECENT_LINES:
+                    del recent_lines[0]
+
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=subprocess_env
             )
 
+            stdout_task = asyncio.create_task(_stream_reader(process.stdout, "stdout"))
+            stderr_task = asyncio.create_task(_stream_reader(process.stderr, "stderr"))
+
+            start_time = asyncio.get_event_loop().time()
+            last_progress_count = -1
+            last_progress_time = start_time
+            timed_out = False
+
             while process.returncode is None:
                 job = active_jobs.get(user_id)
                 if job and job["cancel"]:
                     process.kill()
+                    await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
                     await handle_job_cancelled(client, status_msg, user_id, translated_dir, file_idx, total_files, ordered_map)
                     return
+
+                now = asyncio.get_event_loop().time()
+                done_count = len([f for f in os.listdir(file_translated_dir) if f.lower().endswith(IMAGE_EXTS)]) if os.path.exists(file_translated_dir) else 0
+
+                # Track whether real progress (a new output image) has happened,
+                # to distinguish "slow but moving" from "actually stalled".
+                if done_count != last_progress_count:
+                    last_progress_count = done_count
+                    last_progress_time = now
+
+                stalled_for = now - last_progress_time
+                if stalled_for >= STALL_TIMEOUT_SECONDS:
+                    timed_out = True
+                    process.kill()
+                    await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+                    break
+
                 try:
                     await asyncio.wait_for(process.wait(), timeout=2)
                 except asyncio.TimeoutError:
-                    done_count = len([f for f in os.listdir(file_translated_dir) if f.lower().endswith(IMAGE_EXTS)]) if os.path.exists(file_translated_dir) else 0
                     pct = 40 + int((done_count / max(total_images, 1)) * 40)
+                    mins_stalled = int(stalled_for // 60)
+                    stall_note = f" (no new output image for {mins_stalled}m)" if mins_stalled >= 2 else ""
                     await safe_edit(status_msg, 
-                        build_status_text(mode_label, "🧠 OCR + Translation running", file_idx, total_files, done_count, total_images, min(pct, 80)),
+                        build_status_text(mode_label, f"🧠 OCR + Translation running{stall_note}", file_idx, total_files, done_count, total_images, min(pct, 80)),
                         reply_markup=kb_cancel_only()
                     )
 
-            stdout_bytes, stderr_bytes = await process.communicate()
-            stdout_text = (stdout_bytes or b"").decode(errors="replace")
-            stderr_text = (stderr_bytes or b"").decode(errors="replace")
+            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
 
-            print("----- MangaTranslator stdout -----")
-            print(stdout_text)
-            print("----- MangaTranslator stderr -----")
-            print(stderr_text)
-
-            if process.returncode != 0:
-                tail = (stderr_text.strip() or stdout_text.strip() or "no output captured")[-800:]
+            if timed_out:
+                tail = "\n".join(recent_lines[-40:]) or "no output captured before stall"
                 await safe_edit(
                     status_msg,
-                    f"❌ **Engine exited with error on file {file_idx}/{total_files}** (code {process.returncode}):\n```\n{tail}\n```"
+                    f"⏱️ **File {file_idx}/{total_files} stalled for over {STALL_TIMEOUT_SECONDS // 60} min "
+                    f"with no new output image — killed.**\n"
+                    f"This usually means the local OCR model (manga-ocr/paddleocr-vl) is stuck "
+                    f"downloading weights or hanging on CPU inference.\n"
+                    f"**Last engine output:**\n```\n{tail[-800:]}\n```"
+                )
+                active_jobs.pop(user_id, None)
+                return
+
+            if process.returncode != 0:
+                tail = "\n".join(recent_lines[-40:]) or "no output captured"
+                await safe_edit(
+                    status_msg,
+                    f"❌ **Engine exited with error on file {file_idx}/{total_files}** (code {process.returncode}):\n```\n{tail[-800:]}\n```"
                 )
                 active_jobs.pop(user_id, None)
                 return
@@ -2631,7 +2694,7 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
             produced_files = [f for f in os.listdir(file_translated_dir) if f.lower().endswith(IMAGE_EXTS)]
 
         if not produced_files:
-            debug_tail = (stderr_text.strip() or stdout_text.strip() or "no output captured")[-500:]
+            debug_tail = ("\n".join(recent_lines[-40:]) or "no output captured")[-500:]
             failure_reasons.append((file_idx, debug_tail))
             await safe_edit(
                 status_msg,

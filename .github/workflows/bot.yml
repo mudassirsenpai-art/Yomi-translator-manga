@@ -54,11 +54,12 @@ jobs:
       - name: Clone & Setup MangaTranslator Core
         run: |
           rm -rf MangaTranslator
-          # Cloning OUR fork's main branch (not the upstream meangrinch repo)
-          # so our custom changes -- the optional Gemma vision pre-pass before
-          # YOLO detection -- are what actually gets used at runtime. Whatever
-          # is pushed to main on our fork is what this workflow will run.
-          git clone --branch main --depth 1 https://github.com/mudassirsenpai-art/Mahan-power-Translator.git MangaTranslator
+          # Using our own fork with Manual Translation Mode support, instead of
+          # upstream meangrinch/MangaTranslator - main.py/core/pipeline.py/
+          # core/services/translation.py here carry the manual-mode changes
+          # bot.py depends on (--manual-ocr-checkpoint, --manual-render-checkpoint,
+          # --manual-translations-json flags, checkpoint save/load, OCR-only batch).
+          git clone --branch main --depth 1 https://github.com/mudassirsenpai-art/Manual-auto-MangaTranslator.git MangaTranslator
           cd MangaTranslator
           # PyTorch must be installed explicitly - it is NOT in requirements.txt
           # because it's hardware-specific (CPU/CUDA/ROCm/MPS).

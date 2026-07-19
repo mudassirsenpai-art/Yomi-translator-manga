@@ -1,4 +1,25 @@
 import os
+
+# On CPU-only runners (e.g. GitHub Actions hosted runners, typically 2-4
+# vCPUs), torch/OpenBLAS/MKL/Paddle each default to spawning as many threads
+# as there are visible cores. When several of these libraries are active in
+# the same process (as they are during OCR: torch for the VLM, Paddle for
+# YOLO), this causes severe thread oversubscription/contention that can make
+# a single model.generate() call appear to hang indefinitely, even though
+# nothing is actually deadlocked - it's just extreme scheduling thrash.
+# Capping thread counts up front (before torch/paddle are imported anywhere,
+# including in the main.py subprocess this script launches, which inherits
+# this environment) avoids that failure mode. Override via env if a given
+# deployment has more cores to spare.
+for _thread_env_var in (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "TORCH_NUM_THREADS",
+):
+    os.environ.setdefault(_thread_env_var, os.environ.get("BOT_CPU_THREADS", "2"))
+
 import re
 import sys
 import json

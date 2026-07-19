@@ -464,7 +464,7 @@ def kb_font_hinting_select(cfg):
 # ================= Detection Settings Keyboards (YOLO/OCR) =================
 SEG_MODEL_OPTIONS = ["yolo", "sam2", "sam3"]
 BUBBLE_DETECTOR_OPTIONS = ["yolo_1", "yolo_2"]
-OCR_METHOD_OPTIONS = ["LLM", "manga-ocr", "paddleocr-vl"]
+OCR_METHOD_OPTIONS = ["LLM", "manga-ocr", "paddleocr-vl-1.6"]
 TRANSLATION_MODE_OPTIONS = ["one-step", "two-step"]
 
 # ================= Value Validation (prevents invalid CLI args reaching main.py) =================
@@ -1300,7 +1300,7 @@ async def handle_callbacks(client, query: CallbackQuery):
             "• **Conjoined Bubble Detection**: on/off for that secondary pass.\n"
             "• **Segmentation Model**: yolo / sam2 / sam3.\n"
             "• **Bubble Detector Model**: which primary detector weights to use.\n"
-            "• **OCR Method**: vision LLM vs local manga-ocr/paddleocr-vl "
+            "• **OCR Method**: vision LLM vs local manga-ocr/paddleocr-vl-1.6 "
             "(local options need `two-step` translation mode).\n\n"
             "_\"Original/Default\" = untouched, exactly like before this menu existed._",
             reply_markup=kb_detection_menu(cfg)

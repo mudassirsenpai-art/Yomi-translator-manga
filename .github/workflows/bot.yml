@@ -66,6 +66,14 @@ jobs:
           # because it's hardware-specific (CPU/CUDA/ROCm/MPS).
           pip install torch==2.11.0 torchvision==0.26.0 --extra-index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
+          # PaddlePaddle (CPU build) is required by the paddleocr-vl OCR method.
+          # Like torch, it's hardware-specific and not in requirements.txt, so
+          # without this it gets pulled in lazily on first use inside the job -
+          # which on a CPU Actions runner can silently take many minutes (large
+          # wheel download + install) and looks exactly like a stuck/frozen job.
+          # Installing it up front here means it's ready before main.py runs.
+          pip install paddlepaddle==3.2.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+          pip install paddleocr
           # Pillow: image stitching / tiling / PDF packaging
           # numpy: row-flatness analysis for safe-cut Manhwa tiling
           # PyMuPDF: pure-Python PDF page extraction (replaces pdftoppm)
@@ -75,6 +83,7 @@ jobs:
       - name: Verify Core Imports
         run: |
           python -c "import fitz; import PIL; import numpy; import pyrogram; import tgcrypto; print('core imports OK')"
+          python -c "import paddle; print('paddle OK, version', paddle.__version__)"
 
       - name: Run Telegram Bot
         env:

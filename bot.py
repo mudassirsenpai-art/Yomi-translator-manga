@@ -2901,6 +2901,17 @@ async def execute_manual_pipeline_pass2(client, status_msg: Message, user_id: in
     file_entries = job["file_entries"]
     total_files = len(file_entries)
 
+    # Pass 1 already created job_root/fonts and copied the user's selected
+    # font into it (see execute_manual_pipeline_pass1). Reuse the same dir
+    # here so Pass 2's render call doesn't fall back to main.py's default
+    # "./fonts" (which doesn't exist and causes blank/untranslated renders).
+    font_dir_for_run = os.path.join(job_root, "fonts")
+    os.makedirs(font_dir_for_run, exist_ok=True)
+    if cfg.get("font_name"):
+        src_font = FONTS_DIR / cfg["font_name"]
+        if src_font.exists() and not (Path(font_dir_for_run) / cfg["font_name"]).exists():
+            shutil.copy(src_font, font_dir_for_run)
+
     try:
         with open(translations_json_path, "r", encoding="utf-8") as f:
             edited = json.load(f)
@@ -2952,9 +2963,13 @@ async def execute_manual_pipeline_pass2(client, status_msg: Message, user_id: in
             "--batch",
             "--manual-render-checkpoint", entry["checkpoint_dir"],
             "--manual-translations-json", per_file_json_path,
+            "--font-dir", font_dir_for_run,
             "--input-language", cfg['source_lang'],
             "--output-language", cfg['target_lang'],
         ]
+
+        if cfg.get("osb_enabled", True) and cli_supports_flag("--osb-font-dir"):
+            cmd += ["--osb-font-dir", font_dir_for_run]
 
         try:
             result = await run_engine_subprocess(

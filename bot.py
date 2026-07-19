@@ -1,4 +1,25 @@
 import os
+
+# On CPU-only runners (e.g. GitHub Actions hosted runners, typically 2-4
+# vCPUs), torch/OpenBLAS/MKL/Paddle each default to spawning as many threads
+# as there are visible cores. When several of these libraries are active in
+# the same process (as they are during OCR: torch for the VLM, Paddle for
+# YOLO), this causes severe thread oversubscription/contention that can make
+# a single model.generate() call appear to hang indefinitely, even though
+# nothing is actually deadlocked - it's just extreme scheduling thrash.
+# Capping thread counts up front (before torch/paddle are imported anywhere,
+# including in the main.py subprocess this script launches, which inherits
+# this environment) avoids that failure mode. Override via env if a given
+# deployment has more cores to spare.
+for _thread_env_var in (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "TORCH_NUM_THREADS",
+):
+    os.environ.setdefault(_thread_env_var, os.environ.get("BOT_CPU_THREADS", "2"))
+
 import re
 import sys
 import json
@@ -2901,6 +2922,17 @@ async def execute_manual_pipeline_pass2(client, status_msg: Message, user_id: in
     file_entries = job["file_entries"]
     total_files = len(file_entries)
 
+    # Pass 1 already created job_root/fonts and copied the user's selected
+    # font into it (see execute_manual_pipeline_pass1). Reuse the same dir
+    # here so Pass 2's render call doesn't fall back to main.py's default
+    # "./fonts" (which doesn't exist and causes blank/untranslated renders).
+    font_dir_for_run = os.path.join(job_root, "fonts")
+    os.makedirs(font_dir_for_run, exist_ok=True)
+    if cfg.get("font_name"):
+        src_font = FONTS_DIR / cfg["font_name"]
+        if src_font.exists() and not (Path(font_dir_for_run) / cfg["font_name"]).exists():
+            shutil.copy(src_font, font_dir_for_run)
+
     try:
         with open(translations_json_path, "r", encoding="utf-8") as f:
             edited = json.load(f)
@@ -2952,9 +2984,13 @@ async def execute_manual_pipeline_pass2(client, status_msg: Message, user_id: in
             "--batch",
             "--manual-render-checkpoint", entry["checkpoint_dir"],
             "--manual-translations-json", per_file_json_path,
+            "--font-dir", font_dir_for_run,
             "--input-language", cfg['source_lang'],
             "--output-language", cfg['target_lang'],
         ]
+
+        if cfg.get("osb_enabled", True) and cli_supports_flag("--osb-font-dir"):
+            cmd += ["--osb-font-dir", font_dir_for_run]
 
         try:
             result = await run_engine_subprocess(

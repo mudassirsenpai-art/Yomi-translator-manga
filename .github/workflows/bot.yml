@@ -54,13 +54,14 @@ jobs:
       - name: Clone & Setup MangaTranslator Core
         run: |
           rm -rf MangaTranslator
-          # Pinned to a tagged release instead of tracking main. v1.21.1 (2026-07-14)
-          # swapped in a new RT-DETR-v2 conjoined-bubble detector model, which this
-          # workflow hit mid-run as a fresh, untested weight download ("Loading
-          # weights: 0/770" crash). Pinning avoids being silently broken by
-          # same-day upstream changes; bump this tag deliberately when ready to
-          # pick up new releases.
-          git clone --branch v1.21.0 --depth 1 https://github.com/meangrinch/MangaTranslator.git
+          # Using mudassirsenpai-art's fork (not upstream meangrinch/MangaTranslator)
+          # because it adds Manual Translation Mode (--manual-ocr-checkpoint /
+          # --manual-render-checkpoint / --manual-translations-json), which
+          # upstream doesn't have and which bot.py's Manual mode depends on.
+          # This fork has no version tags, so we track `main` directly - there's
+          # no pinned release to lock to here. If a future upstream/fork update
+          # breaks something, re-check this step first.
+          git clone --branch main --depth 1 https://github.com/mudassirsenpai-art/Manual-auto-MangaTranslator.git MangaTranslator
           cd MangaTranslator
           # PyTorch must be installed explicitly - it is NOT in requirements.txt
           # because it's hardware-specific (CPU/CUDA/ROCm/MPS).

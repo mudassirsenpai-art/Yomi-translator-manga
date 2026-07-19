@@ -161,10 +161,6 @@ def default_config():
         "seg_model": None, "conjoined_detection": None, "bubble_detector_model": None,
         "ocr_method": None, "osb_enabled": True,
 
-        # Manual Translation Mode (two-pass human-in-the-loop workflow, separate
-        # from translation_mode's one-step/two-step OCR strategy)
-        "manual_translation_mode": False,
-
         # ALL OTHER main.py flags mapped for JSON Import/Export
         "temperature": None, "top_p": None, "top_k": None, "max_tokens": None,
         "translation_mode": None, "reasoning_effort": None, "effort": None, 
@@ -464,7 +460,7 @@ def kb_font_hinting_select(cfg):
 # ================= Detection Settings Keyboards (YOLO/OCR) =================
 SEG_MODEL_OPTIONS = ["yolo", "sam2", "sam3"]
 BUBBLE_DETECTOR_OPTIONS = ["yolo_1", "yolo_2"]
-OCR_METHOD_OPTIONS = ["LLM", "manga-ocr", "paddleocr-vl-1.6"]
+OCR_METHOD_OPTIONS = ["LLM", "manga-ocr", "paddleocr-vl"]
 TRANSLATION_MODE_OPTIONS = ["one-step", "two-step"]
 
 # ================= Value Validation (prevents invalid CLI args reaching main.py) =================
@@ -676,7 +672,6 @@ def kb_detection_menu(cfg):
     conj_det_label = "Original/Default (On)" if conj_det is None else ("✅ On" if conj_det else "❌ Off")
 
     trans_mode = _detect_val_label(cfg, "translation_mode", "one-step")
-    manual_mode_label = "✅ On (edit translations yourself)" if cfg.get("manual_translation_mode") else "❌ Off (AI translates automatically)"
 
     rows = [
         [InlineKeyboardButton(f"🎯 Bubble Confidence: {conf}", callback_data="detect_field_confidence")],
@@ -687,7 +682,6 @@ def kb_detection_menu(cfg):
         [InlineKeyboardButton(f"🫧 Bubble Detector Model: {bubble_model}", callback_data="detect_bubblemodel_open")],
         [InlineKeyboardButton(f"👁 OCR Method: {ocr}", callback_data="detect_ocr_open")],
         [InlineKeyboardButton(f"🔀 Translation Mode: {trans_mode}", callback_data="detect_transmode_open")],
-        [InlineKeyboardButton(f"✍️ Manual Translation Mode: {manual_mode_label}", callback_data="detect_bool_manual_translation_mode")],
         [InlineKeyboardButton("♻️ Reset All to Original/Default", callback_data="detect_reset_all")],
         [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")],
     ]
@@ -711,15 +705,6 @@ def kb_detect_bool_select(cfg, field):
         [InlineKeyboardButton(f"{mark(True)}On", callback_data=f"detectboolset_{field}_on")],
         [InlineKeyboardButton(f"{mark(False)}Off", callback_data=f"detectboolset_{field}_off")],
         [InlineKeyboardButton(f"{'✅ ' if val is None else ''}Original/Default", callback_data=f"detectboolset_{field}_default")],
-        [InlineKeyboardButton("🔙 Back", callback_data="menu_detection")],
-    ]
-    return InlineKeyboardMarkup(rows)
-
-def kb_manual_mode_select(cfg):
-    val = bool(cfg.get("manual_translation_mode"))
-    rows = [
-        [InlineKeyboardButton(f"{'✅ ' if val else ''}✍️ On — I'll edit translations myself", callback_data="manualmodeset_on")],
-        [InlineKeyboardButton(f"{'✅ ' if not val else ''}🤖 Off — AI translates automatically", callback_data="manualmodeset_off")],
         [InlineKeyboardButton("🔙 Back", callback_data="menu_detection")],
     ]
     return InlineKeyboardMarkup(rows)
@@ -935,11 +920,6 @@ async def cancel_cmd(client, message: Message):
     else:
         pending_files.pop(user_id, None)
         awaiting_reply.pop(user_id, None)
-        manual_job = manual_jobs.pop(user_id, None)
-        if manual_job:
-            job_root = manual_job.get("job_root")
-            if job_root and os.path.exists(job_root):
-                shutil.rmtree(job_root, ignore_errors=True)
         await message.reply_text("✅ Session cleared.")
 
 # ================= Safe Background Task Runner =================
@@ -1300,7 +1280,7 @@ async def handle_callbacks(client, query: CallbackQuery):
             "• **Conjoined Bubble Detection**: on/off for that secondary pass.\n"
             "• **Segmentation Model**: yolo / sam2 / sam3.\n"
             "• **Bubble Detector Model**: which primary detector weights to use.\n"
-            "• **OCR Method**: vision LLM vs local manga-ocr/paddleocr-vl-1.6 "
+            "• **OCR Method**: vision LLM vs local manga-ocr/paddleocr-vl "
             "(local options need `two-step` translation mode).\n\n"
             "_\"Original/Default\" = untouched, exactly like before this menu existed._",
             reply_markup=kb_detection_menu(cfg)
@@ -1333,29 +1313,6 @@ async def handle_callbacks(client, query: CallbackQuery):
         await save_user_config(user_id)
         await safe_answer(query, "Updated")
         await safe_edit(query.message, "🧩 **Conjoined Bubble Detection:**", reply_markup=kb_detect_bool_select(cfg, field))
-        return
-
-    if data == "detect_bool_manual_translation_mode":
-        await safe_edit(
-            query.message,
-            "✍️ **Manual Translation Mode**\n\n"
-            "When **On**, after OCR the bot sends you a JSON file with every "
-            "detected bubble's original text. Fill in your own translations "
-            "and reply to that message with the edited file — the bot will "
-            "then render your translations onto the pages instead of calling "
-            "the AI translation step. Useful for weaker/free LLMs, or when "
-            "you just want full manual control over the wording.\n\n"
-            "When **Off** (default), translation runs automatically as usual.",
-            reply_markup=kb_manual_mode_select(cfg)
-        )
-        return
-
-    if data.startswith("manualmodeset_"):
-        choice = data.split("_", 1)[1]
-        cfg["manual_translation_mode"] = (choice == "on")
-        await save_user_config(user_id)
-        await safe_answer(query, "Manual Translation Mode " + ("enabled" if choice == "on" else "disabled"))
-        await safe_edit(query.message, "✍️ **Manual Translation Mode:**", reply_markup=kb_manual_mode_select(cfg))
         return
 
     if data == "detect_seg_open":
@@ -1412,7 +1369,6 @@ async def handle_callbacks(client, query: CallbackQuery):
             "conjoined_detection", "bubble_detector_model", "ocr_method", "translation_mode",
         ):
             cfg[field] = None
-        cfg["manual_translation_mode"] = False
         await save_user_config(user_id)
         await safe_answer(query, "Detection settings reset to Original/Default")
         await safe_edit(
@@ -1683,31 +1639,6 @@ async def receive_files(client, message: Message):
         cfg["font_name"] = doc_name
         await save_user_config(user_id)
         await message.reply_text(f"✅ Font `{doc_name}` added to library and selected.", reply_markup=kb_font_menu(cfg))
-        return
-
-    if pending_reply and pending_reply["type"] == "manual_translations_reply" and message.document:
-        doc_name = message.document.file_name or ""
-        if not doc_name.lower().endswith(".json"):
-            await message.reply_text("❌ Please reply with the edited `.json` file (as a document).")
-            return
-
-        job = manual_jobs.get(user_id)
-        if not job:
-            awaiting_reply.pop(user_id, None)
-            await message.reply_text("❌ No pending manual translation job found. Send `/translate` again.")
-            return
-
-        if user_id in active_jobs:
-            await message.reply_text("⚠️ A job is already running. Wait for it to finish or `/cancel` first.")
-            return
-
-        dest_path = os.path.join(job["job_root"], "received_translations.json")
-        await message.download(file_name=dest_path)
-
-        awaiting_reply.pop(user_id, None)
-        status_msg = await message.reply_text("🔄 Rendering your manual translations...")
-        active_jobs[user_id] = {"cancel": False, "status_msg": status_msg}
-        run_job(execute_manual_pipeline_pass2(client, status_msg, user_id, dest_path), status_msg, user_id)
         return
 
     if pending_reply and pending_reply["type"] == "settings_import" and message.document:
@@ -2049,13 +1980,6 @@ async def handle_reply_capture(client, message: Message):
 
 # ================= Job State for Pause/Resume =================
 paused_jobs = {} 
-
-# ================= Job State for Manual Translation Mode =================
-# Keyed by user_id. Holds everything needed to resume into Pass 2 once the
-# user replies with their edited translations JSON. Populated at the end of
-# execute_manual_pipeline_pass1 and consumed/cleared by
-# handle_manual_translations_reply -> execute_manual_pipeline_pass2.
-manual_jobs = {}
 
 BASE_STAGING = str(BASE_DIR / "workspace")
 
@@ -2483,451 +2407,6 @@ CLI_MAPPINGS = {
     "osb_min_area_ignore_ratio": ("--osb-min-area-ignore-ratio", "val"), "osb_min_side_pixels": ("--osb-min-side-pixels", "val")
 }
 
-# ================= Manual Translation Mode: Pass 1 (OCR-only checkpoint) =================
-async def execute_manual_pipeline_pass1(client, status_msg: Message, user_id: int):
-    """
-    Manual Translation Mode, Pass 1. Mirrors execute_manga_pipeline's file
-    download/extract/flatten steps, but instead of running the full
-    translate+render engine, calls main.py with --manual-ocr-checkpoint so
-    each page is only detected/cleaned/OCR'd (no translation API call) and
-    checkpointed to disk. Every input file's combined_translations.json is
-    then merged into one JSON and sent to the user as a Telegram document;
-    the job is parked in `manual_jobs` awaiting their edited reply instead of
-    being torn down like a normal completed job.
-    """
-    cfg = get_user_config(user_id)
-    queue = pending_files.get(user_id)
-
-    if cfg.get("content_type") == "novel":
-        await safe_edit(
-            status_msg,
-            "📝 **Novel content type isn't supported by this pipeline yet.**\n\n"
-            "Switch **📚 Content Type** to Manhwa/Manga/Comic first."
-        )
-        active_jobs.pop(user_id, None)
-        return
-
-    mode = queue["mode"]
-    files = queue["files"]
-    MODE_LABELS = {"raw": "Raw Images", "archive": "ZIP/CBZ Extraction", "pdf": "PDF Extraction"}
-    mode_label = MODE_LABELS.get(mode, mode)
-
-    job_root = os.path.join(BASE_STAGING, str(user_id))
-    if os.path.exists(job_root):
-        shutil.rmtree(job_root)
-    os.makedirs(job_root, exist_ok=True)
-    font_dir_for_run = os.path.join(job_root, "fonts")
-    os.makedirs(font_dir_for_run, exist_ok=True)
-    if cfg.get("font_name"):
-        src_font = FONTS_DIR / cfg["font_name"]
-        if src_font.exists():
-            shutil.copy(src_font, font_dir_for_run)
-
-    total_files = len(files)
-    dynamic_system_instruction = build_dynamic_system_instruction(cfg)
-
-    subprocess_env = os.environ.copy()
-    subprocess_env['INPUT_LANG'] = cfg['source_lang']
-    subprocess_env['PROVIDER'] = cfg['provider']
-    subprocess_env['API_URL'] = cfg['api_url']
-    subprocess_env['API_KEY'] = cfg['api_key']
-    subprocess_env['MODEL_NAME'] = cfg['model_name']
-    subprocess_env['SPECIAL_INS'] = dynamic_system_instruction
-
-    last_minute_cleared = sanitize_cfg_values(cfg)
-    if last_minute_cleared:
-        await save_user_config(user_id)
-        bad_list = ", ".join(f"{f}='{v}'" for f, v in last_minute_cleared)
-        await safe_edit(
-            status_msg,
-            f"⚠️ Corrected invalid setting(s) before running: {bad_list} "
-            f"(reset to engine default). Continuing..."
-        )
-
-    combined_pages = []  # merged across all files, in file/page order
-    file_entries = []    # per-file bookkeeping for Pass 2 (input_dir, checkpoint_dir, output_format)
-
-    for file_idx, source_message in enumerate(files, start=1):
-        job = active_jobs.get(user_id)
-        if job and job["cancel"]:
-            active_jobs.pop(user_id, None)
-            manual_jobs.pop(user_id, None)
-            await safe_edit(status_msg, "🛑 **Manual mode Pass 1 cancelled.**")
-            if os.path.exists(job_root):
-                shutil.rmtree(job_root, ignore_errors=True)
-            return
-
-        input_dir = os.path.join(job_root, f"input_{file_idx:03d}")
-        os.makedirs(input_dir, exist_ok=True)
-        checkpoint_dir = os.path.join(job_root, ".manual_checkpoint", f"file_{file_idx:03d}")
-        preview_dir = os.path.join(job_root, "preview", f"file_{file_idx:03d}")
-        os.makedirs(preview_dir, exist_ok=True)
-
-        await safe_edit(status_msg, build_status_text(mode_label, "📥 Downloading payload", file_idx, total_files, 0, 0, 5))
-        downloaded_path = await source_message.download(file_name=os.path.join(job_root, f"src_{file_idx:03d}"))
-
-        if source_message.document and source_message.document.file_name:
-            ext = os.path.splitext(source_message.document.file_name)[1] or ".jpg"
-        elif source_message.photo:
-            ext = ".jpg"
-        else:
-            ext = ""
-
-        if ext and not downloaded_path.lower().endswith(ext.lower()):
-            fixed_path = downloaded_path + ext
-            os.rename(downloaded_path, fixed_path)
-            downloaded_path = fixed_path
-
-        await safe_edit(status_msg, build_status_text(mode_label, "📂 Extracting", file_idx, total_files, 0, 0, 15))
-        if mode == "archive" or downloaded_path.lower().endswith(('.zip', '.cbz')):
-            extract_archive(downloaded_path, input_dir)
-        elif mode == "pdf" or downloaded_path.lower().endswith('.pdf'):
-            extract_pdf(downloaded_path, input_dir)
-        else:
-            shutil.move(downloaded_path, os.path.join(input_dir, os.path.basename(downloaded_path)))
-
-        # Manual mode currently targets single/multi-page manga/comic-style
-        # jobs page-by-page; still run flatten_and_order (handles naming,
-        # ordering, and manhwa tiling if applicable) so page order matches
-        # what the rest of the bot expects.
-        ordered_map, tile_manifest = flatten_and_order(input_dir, content_type=cfg.get("content_type", "manhwa"), cfg=cfg)
-        total_images = len(ordered_map)
-
-        if total_images == 0:
-            await safe_edit(status_msg, f"⚠️ File {file_idx}/{total_files}: no valid images found, skipping.")
-            continue
-
-        if tile_manifest:
-            tiled_pages = len(tile_manifest)
-            total_tiles = sum(len(v["tiles"]) for v in tile_manifest.values())
-            await safe_edit(
-                status_msg,
-                f"✂️ File {file_idx}/{total_files}: {tiled_pages} tall page(s) tiled into "
-                f"{total_tiles} tile(s) for OCR. They'll be recomposed automatically after "
-                f"you send back your edited translations."
-            )
-
-        cmd = [
-            "python",
-            "-W", "ignore:Image size:UserWarning",
-            "MangaTranslator/main.py",
-            "--input", input_dir,
-            "--output", preview_dir,
-            "--batch",
-            "--manual-ocr-checkpoint", checkpoint_dir,
-            "--font-dir", font_dir_for_run,
-            "--input-language", cfg['source_lang'],
-            "--output-language", cfg['target_lang'],
-            "--provider", cfg['provider'],
-            "--openai-compatible-url", cfg['api_url'],
-            "--openai-compatible-api-key", cfg['api_key'],
-            "--model-name", cfg['model_name'],
-            "--special-instructions", dynamic_system_instruction
-        ]
-
-        if cfg.get("osb_enabled", True) and cli_supports_flag("--osb-enable"):
-            cmd.append("--osb-enable")
-            if cli_supports_flag("--osb-font-dir"):
-                cmd += ["--osb-font-dir", font_dir_for_run]
-
-        for key, config_meta in CLI_MAPPINGS.items():
-            flag, val_type = config_meta
-            val = cfg.get(key)
-            if val is not None and cli_supports_flag(flag):
-                if val_type == "val":
-                    cmd += [flag, str(val)]
-                elif val_type == "bool_true" and val is True:
-                    cmd.append(flag)
-                elif val_type == "bool_invert" and val is False:
-                    cmd.append(flag)
-
-        await safe_edit(status_msg,
-            build_status_text(mode_label, "🧠 OCR running (Manual mode Pass 1 — no translation yet)", file_idx, total_files, 0, total_images, 40),
-            reply_markup=kb_cancel_only()
-        )
-
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=subprocess_env
-            )
-
-            while process.returncode is None:
-                job = active_jobs.get(user_id)
-                if job and job["cancel"]:
-                    process.kill()
-                    active_jobs.pop(user_id, None)
-                    manual_jobs.pop(user_id, None)
-                    await safe_edit(status_msg, "🛑 **Manual mode Pass 1 cancelled.**")
-                    if os.path.exists(job_root):
-                        shutil.rmtree(job_root, ignore_errors=True)
-                    return
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=2)
-                except asyncio.TimeoutError:
-                    pass
-
-            stdout_bytes, stderr_bytes = await process.communicate()
-            stdout_text = (stdout_bytes or b"").decode(errors="replace")
-            stderr_text = (stderr_bytes or b"").decode(errors="replace")
-
-            print("----- MangaTranslator (manual Pass 1) stdout -----")
-            print(stdout_text)
-            print("----- MangaTranslator (manual Pass 1) stderr -----")
-            print(stderr_text)
-
-            if process.returncode != 0:
-                tail = (stderr_text.strip() or stdout_text.strip() or "no output captured")[-800:]
-                await safe_edit(
-                    status_msg,
-                    f"❌ **Manual mode Pass 1 exited with error on file {file_idx}/{total_files}** (code {process.returncode}):\n```\n{tail}\n```"
-                )
-                active_jobs.pop(user_id, None)
-                if os.path.exists(job_root):
-                    shutil.rmtree(job_root, ignore_errors=True)
-                return
-        except Exception as exec_err:
-            await safe_edit(status_msg, f"❌ Manual mode Pass 1 error on file {file_idx}/{total_files}: {exec_err}")
-            active_jobs.pop(user_id, None)
-            if os.path.exists(job_root):
-                shutil.rmtree(job_root, ignore_errors=True)
-            return
-
-        combined_json_path = os.path.join(checkpoint_dir, "combined_translations.json")
-        if not os.path.exists(combined_json_path):
-            await safe_edit(
-                status_msg,
-                f"❌ **File {file_idx}/{total_files}: Pass 1 produced no combined_translations.json.**\n"
-                f"Skipping this file's pages."
-            )
-            continue
-
-        try:
-            with open(combined_json_path, "r", encoding="utf-8") as f:
-                file_combined = json.load(f)
-        except Exception as e:
-            await safe_edit(status_msg, f"❌ File {file_idx}/{total_files}: failed to read its translations JSON: {e}")
-            continue
-
-        # Namespace each page's source_file with the file index, so a
-        # multi-file job's merged JSON can't collide on identically-named
-        # pages (e.g. "001.jpg" appearing in two different uploaded ZIPs),
-        # and so Pass 2 can route each page back to the right file's
-        # checkpoint directory.
-        for page in file_combined.get("pages", []):
-            page["file_idx"] = file_idx
-            page["display_name"] = f"file{file_idx:03d}/{page.get('source_file')}"
-            combined_pages.append(page)
-
-        file_entries.append({
-            "file_idx": file_idx,
-            "checkpoint_dir": checkpoint_dir,
-            "output_format": cfg['output_format'],
-            "chat_id": source_message.chat.id,
-            "tile_manifest": tile_manifest or None,
-        })
-
-    if not combined_pages:
-        await safe_edit(status_msg, "⚠️ **Manual mode Pass 1 finished but no pages were OCR'd.** Check the files you sent.")
-        active_jobs.pop(user_id, None)
-        pending_files.pop(user_id, None)
-        if os.path.exists(job_root):
-            shutil.rmtree(job_root, ignore_errors=True)
-        return
-
-    merged = {
-        "version": 1,
-        "input_language": cfg['source_lang'],
-        "output_language": cfg['target_lang'],
-        "instructions": (
-            "Fill in the 'translation' field for each bubble with your translated "
-            "text, then reply to the message this file was sent with, attaching "
-            "your edited copy of this JSON. Leave 'translation' empty to keep the "
-            "original OCR'd text for that bubble."
-        ),
-        "pages": combined_pages,
-    }
-    merged_json_path = os.path.join(job_root, "combined_translations.json")
-    with open(merged_json_path, "w", encoding="utf-8") as f:
-        json.dump(merged, f, ensure_ascii=False, indent=2)
-
-    total_bubbles = sum(len(p.get("bubbles", [])) for p in combined_pages)
-    sent_msg = await client.send_document(
-        status_msg.chat.id,
-        document=merged_json_path,
-        caption=(
-            f"✍️ **Manual Translation Mode — Pass 1 complete!**\n"
-            f"📄 Pages: `{len(combined_pages)}` across `{len(file_entries)}` file(s)\n"
-            f"💬 Bubbles detected: `{total_bubbles}`\n\n"
-            f"Fill in each bubble's `translation` field in this JSON, then **reply "
-            f"to this message** with your edited file to continue."
-        )
-    )
-
-    manual_jobs[user_id] = {
-        "job_root": job_root,
-        "file_entries": file_entries,
-        "cfg_snapshot": dict(cfg),
-        "combined_json_message_id": sent_msg.id,
-        "total_files": total_files,
-    }
-    awaiting_reply[user_id] = {"type": "manual_translations_reply", "extra": {"reply_to_message_id": sent_msg.id}}
-
-    await safe_edit(
-        status_msg,
-        f"✅ **Pass 1 done — {len(combined_pages)} page(s) OCR'd, {total_bubbles} bubble(s) found.**\n"
-        f"📤 Translations JSON sent above. Reply to it with your edited copy when ready.\n"
-        f"Send `/cancel` to abandon this manual job."
-    )
-    active_jobs.pop(user_id, None)
-
-
-# ================= Manual Translation Mode: Pass 2 (render from checkpoint) =================
-async def execute_manual_pipeline_pass2(client, status_msg: Message, user_id: int, translations_json_path: str):
-    """
-    Manual Translation Mode, Pass 2. Reads the user's edited translations
-    JSON (already validated/split back into per-file JSONs by the caller),
-    calls main.py with --manual-render-checkpoint + --manual-translations-json
-    for each file's checkpoint directory (no detection/cleaning/OCR re-run),
-    and packages/sends each file's rendered output the same way the normal
-    pipeline does via package_output.
-    """
-    job = manual_jobs.get(user_id)
-    if not job:
-        await safe_edit(status_msg, "❌ No pending manual translation job found. Send `/translate` again.")
-        active_jobs.pop(user_id, None)
-        return
-
-    cfg = job["cfg_snapshot"]
-    job_root = job["job_root"]
-    file_entries = job["file_entries"]
-    total_files = len(file_entries)
-
-    try:
-        with open(translations_json_path, "r", encoding="utf-8") as f:
-            edited = json.load(f)
-    except Exception as e:
-        await safe_edit(status_msg, f"❌ Couldn't parse your edited JSON: {e}\nFix it and reply again with the corrected file.")
-        active_jobs.pop(user_id, None)
-        awaiting_reply[user_id] = {"type": "manual_translations_reply", "extra": {"reply_to_message_id": job.get("combined_json_message_id")}}
-        return
-
-    # Split the merged JSON back into one per-file JSON (matching what each
-    # file's own main.py --manual-render-checkpoint invocation expects),
-    # keyed by the file_idx namespacing added during Pass 1.
-    pages_by_file = {}
-    for page in edited.get("pages", []):
-        file_idx = page.get("file_idx")
-        pages_by_file.setdefault(file_idx, []).append(page)
-
-    active_jobs[user_id] = {"cancel": False, "status_msg": status_msg}
-    all_translated_outputs = []
-    render_dir = os.path.join(job_root, "rendered")
-    os.makedirs(render_dir, exist_ok=True)
-
-    for entry in file_entries:
-        job_ctrl = active_jobs.get(user_id)
-        if job_ctrl and job_ctrl["cancel"]:
-            break
-
-        file_idx = entry["file_idx"]
-        pages = pages_by_file.get(file_idx, [])
-        if not pages:
-            continue
-
-        per_file_json = {"version": 1, "pages": pages}
-        per_file_json_path = os.path.join(job_root, f"translations_file_{file_idx:03d}.json")
-        with open(per_file_json_path, "w", encoding="utf-8") as f:
-            json.dump(per_file_json, f, ensure_ascii=False, indent=2)
-
-        file_render_dir = os.path.join(render_dir, f"file_{file_idx:03d}")
-        os.makedirs(file_render_dir, exist_ok=True)
-
-        await safe_edit(status_msg, build_status_text("Manual Render", "🎨 Rendering translations", file_idx, total_files, 0, len(pages), 40))
-
-        cmd = [
-            "python",
-            "-W", "ignore:Image size:UserWarning",
-            "MangaTranslator/main.py",
-            "--input", entry["checkpoint_dir"],
-            "--output", file_render_dir,
-            "--batch",
-            "--manual-render-checkpoint", entry["checkpoint_dir"],
-            "--manual-translations-json", per_file_json_path,
-            "--input-language", cfg['source_lang'],
-            "--output-language", cfg['target_lang'],
-        ]
-
-        try:
-            process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            stdout_bytes, stderr_bytes = await process.communicate()
-            stdout_text = (stdout_bytes or b"").decode(errors="replace")
-            stderr_text = (stderr_bytes or b"").decode(errors="replace")
-            print("----- MangaTranslator (manual Pass 2) stdout -----")
-            print(stdout_text)
-            print("----- MangaTranslator (manual Pass 2) stderr -----")
-            print(stderr_text)
-
-            if process.returncode != 0:
-                tail = (stderr_text.strip() or stdout_text.strip() or "no output captured")[-800:]
-                await safe_edit(status_msg, f"❌ **Manual render failed for file {file_idx}/{total_files}:**\n```\n{tail}\n```")
-                continue
-        except Exception as exec_err:
-            await safe_edit(status_msg, f"❌ Manual render error on file {file_idx}/{total_files}: {exec_err}")
-            continue
-
-        tile_manifest = entry.get("tile_manifest")
-        if tile_manifest:
-            await safe_edit(status_msg, build_status_text("Manual Render", "🧵 Recomposing tiled pages", file_idx, total_files, len(pages), len(pages), 70))
-            recompose_failures = []
-            for page_idx, manifest_entry in tile_manifest.items():
-                try:
-                    result = recompose_tiled_page(file_render_dir, page_idx, manifest_entry, cfg=cfg)
-                except Exception:
-                    result = None
-                if result is None:
-                    recompose_failures.append(page_idx)
-            if recompose_failures:
-                await safe_edit(
-                    status_msg,
-                    f"⚠️ File {file_idx}/{total_files}: {len(recompose_failures)} tiled page(s) "
-                    f"had a tile missing/failed after render, so those page(s) may be incomplete."
-                )
-
-        produced_files = [f for f in os.listdir(file_render_dir) if f.lower().endswith(IMAGE_EXTS)] if os.path.exists(file_render_dir) else []
-        if not produced_files:
-            await safe_edit(status_msg, f"⚠️ File {file_idx}/{total_files}: render produced no images, skipping.")
-            continue
-
-        try:
-            output_path = package_output(file_render_dir, job_root, file_idx, entry["output_format"])
-            all_translated_outputs.append((file_idx, output_path))
-            format_label = "Raw Images (.ZIP)" if entry["output_format"] == "img" else f".{entry['output_format'].upper()}"
-            await client.send_document(
-                entry["chat_id"],
-                document=output_path,
-                caption=(
-                    f"💥 **File {file_idx}/{total_files} done (Manual Translation)!**\n"
-                    f"📦 Format: `{format_label}`\n"
-                    f"🖼 Frames: `{len(produced_files)}`"
-                )
-            )
-        except Exception as send_err:
-            await safe_edit(status_msg, f"❌ **Failed to send file {file_idx}/{total_files}:**\n`{send_err}`")
-            continue
-
-    if all_translated_outputs:
-        await safe_edit(status_msg, f"✅ **{len(all_translated_outputs)}/{total_files} file(s) rendered from your manual translations and sent!**")
-    else:
-        await safe_edit(status_msg, "⚠️ **Manual render finished but no files were produced/sent.** Check the logs.")
-
-    active_jobs.pop(user_id, None)
-    manual_jobs.pop(user_id, None)
-    pending_files.pop(user_id, None)
-    awaiting_reply.pop(user_id, None)
-    if os.path.exists(job_root):
-        shutil.rmtree(job_root, ignore_errors=True)
-
-
 # ================= Main Pipeline Runner =================
 async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
     cfg = get_user_config(user_id)
@@ -2936,10 +2415,6 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
     if not queue or not queue["files"]:
         await safe_edit(status_msg, "❌ Error: No files found in queue. Send `/translate` again.")
         active_jobs.pop(user_id, None)
-        return
-
-    if cfg.get("manual_translation_mode"):
-        await execute_manual_pipeline_pass1(client, status_msg, user_id)
         return
 
     if cfg.get("content_type") == "novel":

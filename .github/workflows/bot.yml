@@ -95,6 +95,20 @@ jobs:
           # If this specific import fails, the traceback below is the real
           # cause - e.g. a missing/incompatible transformers class.
           cd MangaTranslator && python -c "import sys; sys.path.insert(0, '.'); from core.ml.model_manager import ModelManager, get_model_manager; print('core.ml.model_manager OK'); from core.image.ocr_detection import OutsideTextDetector; print('core.image.ocr_detection OK')"
+          cd ..
+          # Reproduce the EXACT way bot.py invokes main.py: from the repo
+          # root cwd, as "python MangaTranslator/main.py" (not "cd
+          # MangaTranslator && python main.py" like the check above). If the
+          # check above passes but this one fails, the cwd/invocation style
+          # itself is the cause, not the code.
+          python MangaTranslator/main.py --help > /tmp/main_help_output.txt 2>&1
+          MAIN_HELP_EXIT=$?
+          echo "--- python MangaTranslator/main.py --help output (exit $MAIN_HELP_EXIT) ---"
+          cat /tmp/main_help_output.txt
+          if [ $MAIN_HELP_EXIT -ne 0 ]; then
+            echo "::error::python MangaTranslator/main.py --help failed with exit $MAIN_HELP_EXIT - see output above"
+            exit 1
+          fi
 
       - name: Run Telegram Bot
         env:

@@ -2734,6 +2734,7 @@ async def execute_manual_pipeline_pass1(client, status_msg: Message, user_id: in
                 f"{total_tiles} tile(s) for OCR. They'll be recomposed automatically after "
                 f"you send back your edited translations."
             )
+            total_images = len([f for f in os.listdir(input_dir) if f.lower().endswith(IMAGE_EXTS)])
 
         cmd = [
             "python",

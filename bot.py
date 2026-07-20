@@ -519,6 +519,7 @@ VALID_CHOICES = {
     "osb_flux_backend": {"sdcpp", "sdnq", "nunchaku"},
     "osb_flux_sdcpp_cache_mode": {"spectrum", "cache-dit", "taylorseer", "dbcache", "none"},
     "osb_font_hinting": {"none", "slight", "normal", "full"},
+    "font_hinting": {"none", "slight", "normal", "full"},
 }
 
 def sanitize_cfg_values(cfg):
@@ -528,7 +529,10 @@ def sanitize_cfg_values(cfg):
     cleared = []
     for field, allowed in VALID_CHOICES.items():
         val = cfg.get(field)
-        if val is not None and val not in allowed:
+        # Reject anything that isn't a plain string choice (e.g. a stray bool
+        # like True/False that leaked in from a bad menu path or hand-edited
+        # config) in addition to strings that aren't in the allowed set.
+        if val is not None and (not isinstance(val, str) or val not in allowed):
             cleared.append((field, val))
             cfg[field] = None
     return cleared
@@ -2758,6 +2762,19 @@ async def execute_manual_pipeline_pass1(client, status_msg: Message, user_id: in
             cmd.append("--osb-enable")
             if cli_supports_flag("--osb-font-dir"):
                 cmd += ["--osb-font-dir", font_dir_for_run]
+
+        # SAFETY NET: strip any choice-restricted field holding an invalid value
+        # (e.g. a stale/hand-edited font_hinting like True) before it can reach
+        # main.py's argparse and abort the whole job with "invalid choice".
+        last_minute_cleared = sanitize_cfg_values(cfg)
+        if last_minute_cleared:
+            await save_user_config(user_id)
+            bad_list = ", ".join(f"{f}='{v}'" for f, v in last_minute_cleared)
+            await safe_edit(
+                status_msg,
+                f"⚠️ Corrected invalid setting(s) before running: {bad_list} "
+                f"(reset to engine default). Continuing..."
+            )
 
         for key, config_meta in CLI_MAPPINGS.items():
             flag, val_type = config_meta

@@ -485,12 +485,11 @@ def kb_font_hinting_select(cfg):
 # ================= Detection Settings Keyboards (YOLO/OCR) =================
 SEG_MODEL_OPTIONS = ["yolo", "sam2", "sam3"]
 BUBBLE_DETECTOR_OPTIONS = ["yolo_1", "yolo_2"]
-OCR_METHOD_OPTIONS = ["LLM", "manga-ocr", "paddleocr-vl-1.6", "surya-ocr", "paddleocr-classic"]
+OCR_METHOD_OPTIONS = ["LLM", "manga-ocr", "paddleocr-vl-1.6", "paddleocr-classic"]
 OCR_METHOD_LABELS = {
     "LLM": "LLM (vision model)",
     "manga-ocr": "manga-ocr (Japanese only)",
     "paddleocr-vl-1.6": "PaddleOCR-VL (VLM, slow on CPU)",
-    "surya-ocr": "Surya OCR (JP/KR/CN/EN)",
     "paddleocr-classic": "PaddleOCR Classic (JP/KR/CN/EN)",
 }
 TRANSLATION_MODE_OPTIONS = ["one-step", "two-step"]
@@ -1331,8 +1330,8 @@ async def handle_callbacks(client, query: CallbackQuery):
             "• **Segmentation Model**: yolo / sam2 / sam3.\n"
             "• **Bubble Detector Model**: which primary detector weights to use.\n"
             "• **OCR Method**: vision LLM vs local manga-ocr/paddleocr-vl/"
-            "surya-ocr/paddleocr-classic (local options need `two-step` "
-            "translation mode). Surya OCR and PaddleOCR (Classic) support "
+            "paddleocr-classic (local options need `two-step` "
+            "translation mode). PaddleOCR (Classic) supports "
             "Japanese, Korean, Chinese, and English.\n\n"
             "_\"Original/Default\" = untouched, exactly like before this menu existed._",
             reply_markup=kb_detection_menu(cfg)
@@ -2516,7 +2515,7 @@ CLI_MAPPINGS = {
 }
 
 # ================= Shared Engine Runner (live logs + stall timeout) =================
-# Local OCR methods (manga-ocr / paddleocr-vl / surya-ocr / paddleocr-classic) can silently hang on a CPU-only
+# Local OCR methods (manga-ocr / paddleocr-vl / paddleocr-classic) can silently hang on a CPU-only
 # Actions runner - either a slow/rate-limited first-time weight download, or
 # just very slow CPU inference on a VLM like PaddleOCR-VL. Previously all
 # engine output was captured via PIPE and only printed after the process
@@ -2797,7 +2796,7 @@ async def execute_manual_pipeline_pass1(client, status_msg: Message, user_id: in
                     status_msg,
                     f"⏱️ **Manual mode Pass 1 stalled for over {ENGINE_STALL_TIMEOUT // 60} min "
                     f"with no new output — killed** (file {file_idx}/{total_files}).\n"
-                    f"This usually means the local OCR model (manga-ocr/paddleocr-vl/surya-ocr/paddleocr-classic) is stuck "
+                    f"This usually means the local OCR model (manga-ocr/paddleocr-vl/paddleocr-classic) is stuck "
                     f"downloading weights or hanging on CPU inference.\n"
                     f"**Last engine output:**\n```\n{tail[-800:]}\n```"
                 )
@@ -3272,7 +3271,7 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
                     status_msg,
                     f"⏱️ **File {file_idx}/{total_files} stalled for over {ENGINE_STALL_TIMEOUT // 60} min "
                     f"with no new output image — killed.**\n"
-                    f"This usually means the local OCR model (manga-ocr/paddleocr-vl/surya-ocr/paddleocr-classic) is stuck "
+                    f"This usually means the local OCR model (manga-ocr/paddleocr-vl/paddleocr-classic) is stuck "
                     f"downloading weights or hanging on CPU inference.\n"
                     f"**Last engine output:**\n```\n{tail[-800:]}\n```"
                 )

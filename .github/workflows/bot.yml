@@ -61,7 +61,7 @@ jobs:
           # This fork has no version tags, so we track `main` directly - there's
           # no pinned release to lock to here. If a future upstream/fork update
           # breaks something, re-check this step first.
-          git clone --branch main --depth 1 https://github.com/mudassirsenpai-art/Manual-auto-MangaTranslator.git MangaTranslator
+          git clone --branch main --depth 1 https://github.com/mudassirsenpai-art/Custom---made.git MangaTranslator
           cd MangaTranslator
           # PyTorch must be installed explicitly - it is NOT in requirements.txt
           # because it's hardware-specific (CPU/CUDA/ROCm/MPS).

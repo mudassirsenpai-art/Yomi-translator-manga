@@ -89,6 +89,12 @@ jobs:
           python -c "import fitz; import PIL; import numpy; import pyrogram; import tgcrypto; print('core imports OK')"
           python -c "import paddle; print('paddle OK, version', paddle.__version__)"
           python -c "import paddleocr; print('paddleocr (classic) OK')"
+          # Import MangaTranslator's own core.ml.model_manager directly (not
+          # through core.image, which would mask the real error behind a
+          # confusing "cannot import name OutsideTextDetector" ImportError).
+          # If this specific import fails, the traceback below is the real
+          # cause - e.g. a missing/incompatible transformers class.
+          cd MangaTranslator && python -c "import sys; sys.path.insert(0, '.'); from core.ml.model_manager import ModelManager, get_model_manager; print('core.ml.model_manager OK'); from core.image.ocr_detection import OutsideTextDetector; print('core.image.ocr_detection OK')"
 
       - name: Run Telegram Bot
         env:

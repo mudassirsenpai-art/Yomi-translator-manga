@@ -77,7 +77,19 @@ jobs:
           # silently take many minutes (large wheel download + install) and
           # looks exactly like a stuck/frozen job. Installing it up front here
           # means it's ready before main.py runs.
-          pip install paddlepaddle==3.3.1 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+          #
+          # Installed from PyPI (default index), not from
+          # paddlepaddle.org.cn/packages/stable/cpu/. That official index
+          # serves wheels from Baidu's bcebos CDN, which rate-limits per
+          # source IP; GitHub Actions runners share IP ranges across many
+          # concurrent jobs worldwide, so that CDN intermittently returns
+          # "HTTP error 429 Too Many Requests" and fails the whole job. PyPI
+          # publishes the identical paddlepaddle==3.3.1 manylinux CPU wheel
+          # (see https://pypi.org/project/paddlepaddle/3.3.1/#files) and is
+          # served from files.pythonhosted.org, a completely separate CDN not
+          # subject to that rate limit, so this is not a fallback/retry - it's
+          # the correct index to use from a shared CI IP in the first place.
+          pip install paddlepaddle==3.3.1
           # Pillow: image stitching / tiling / PDF packaging
           # numpy: row-flatness analysis for safe-cut Manhwa tiling
           # PyMuPDF: pure-Python PDF page extraction (replaces pdftoppm)

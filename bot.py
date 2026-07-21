@@ -520,6 +520,7 @@ VALID_CHOICES = {
     "osb_flux_backend": {"sdcpp", "sdnq", "nunchaku"},
     "osb_flux_sdcpp_cache_mode": {"spectrum", "cache-dit", "taylorseer", "dbcache", "none"},
     "osb_font_hinting": {"none", "slight", "normal", "full"},
+    "osb_model_variant": {"manga", "webtoon"},
 }
 
 def sanitize_cfg_values(cfg):
@@ -2516,7 +2517,8 @@ CLI_MAPPINGS = {
     "osb_render_expansion_area_threshold": ("--osb-render-expansion-area-threshold", "val"), "osb_text_box_proximity_ratio": ("--osb-text-box-proximity-ratio", "val"),
     "osb_confidence": ("--osb-confidence", "val"), "osb_filter_page_numbers": ("--osb-filter-page-numbers", "bool_true"),
     "osb_page_filter_margin": ("--osb-page-filter-margin", "val"), "osb_page_filter_min_area": ("--osb-page-filter-min-area", "val"),
-    "osb_min_area_ignore_ratio": ("--osb-min-area-ignore-ratio", "val"), "osb_min_side_pixels": ("--osb-min-side-pixels", "val")
+    "osb_min_area_ignore_ratio": ("--osb-min-area-ignore-ratio", "val"), "osb_min_side_pixels": ("--osb-min-side-pixels", "val"),
+    "osb_model_variant": ("--osb-model-variant", "val")
 }
 
 # ================= Shared Engine Runner (live logs + stall timeout) =================
@@ -2760,6 +2762,11 @@ async def execute_manual_pipeline_pass1(client, status_msg: Message, user_id: in
             cmd.append("--osb-enable")
             if cli_supports_flag("--osb-font-dir"):
                 cmd += ["--osb-font-dir", font_dir_for_run]
+
+        # Manhwa (long-strip webtoon) content uses a text-detection model tuned
+        # for that format instead of the manga default; derived live from
+        # content_type rather than stored in cfg so it can't go stale.
+        cfg["osb_model_variant"] = "webtoon" if cfg.get("content_type") == "manhwa" else "manga"
 
         for key, config_meta in CLI_MAPPINGS.items():
             flag, val_type = config_meta
@@ -3238,6 +3245,11 @@ async def execute_manga_pipeline(client, status_msg: Message, user_id: int):
                 f"⚠️ Corrected invalid setting(s) before running: {bad_list} "
                 f"(reset to engine default). Continuing..."
             )
+
+        # Manhwa (long-strip webtoon) content uses a text-detection model tuned
+        # for that format instead of the manga default; derived live from
+        # content_type rather than stored in cfg so it can't go stale.
+        cfg["osb_model_variant"] = "webtoon" if cfg.get("content_type") == "manhwa" else "manga"
 
         # INJECT ALL CUSTOM PARAMETERS
         for key, config_meta in CLI_MAPPINGS.items():

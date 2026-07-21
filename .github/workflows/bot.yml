@@ -77,7 +77,7 @@ jobs:
           # silently take many minutes (large wheel download + install) and
           # looks exactly like a stuck/frozen job. Installing it up front here
           # means it's ready before main.py runs.
-          pip install paddlepaddle==3.2.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+          pip install paddlepaddle==3.3.1 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
           # Pillow: image stitching / tiling / PDF packaging
           # numpy: row-flatness analysis for safe-cut Manhwa tiling
           # PyMuPDF: pure-Python PDF page extraction (replaces pdftoppm)

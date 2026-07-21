@@ -205,6 +205,7 @@ def default_config():
         "osb_flux_low_vram": None, "osb_flux_sdcpp_cache_mode": None, "osb_flux_sdcpp_diffusion_quant": None,
         "osb_flux_sdcpp_text_encoder_quant": None, "osb_flux_upscale_small_crops": None,
         "osb_flux_group_regions": None, "osb_flux_steps": None, "osb_flux_luminance_correction": None,
+        "osb_sfx_skip_inpaint": None,
         "osb_flux_residual_threshold": None, "osb_seed": None, "osb_max_font_size": None,
         "osb_min_font_size": None, "osb_use_ligatures": None, "osb_outline_width": None,
         "osb_line_spacing": None, "osb_use_subpixel": None, "osb_font_hinting": None,
@@ -585,6 +586,7 @@ FIELD_REGISTRY = {
     'osb_flux_sdcpp_text_encoder_quant': {'group': 'osb', 'label': '🔢 OSB Flux SDCPP Text Encoder Quant', 'vtype': 'val', 'argtype': 'str', 'default': None, 'choices': None, 'hint': 'text'},
     'osb_flux_upscale_small_crops': {'group': 'osb', 'label': '⬆️ OSB Flux Upscale Small Crops', 'vtype': 'bool_invert', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
     'osb_flux_group_regions': {'group': 'osb', 'label': '🧩 OSB Flux Group Regions', 'vtype': 'bool_true', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
+    'osb_sfx_skip_inpaint': {'group': 'osb', 'label': '🔇 OSB SFX Skip Inpaint', 'vtype': 'bool_invert', 'argtype': None, 'default': True, 'choices': None, 'hint': None},
     'osb_flux_steps': {'group': 'osb', 'label': '🔁 OSB Flux Steps', 'vtype': 'val', 'argtype': 'int', 'default': 4, 'choices': None, 'hint': 'positive integer'},
     'osb_flux_luminance_correction': {'group': 'osb', 'label': '💡 OSB Flux Luminance Correction', 'vtype': 'bool_invert', 'argtype': None, 'default': None, 'choices': None, 'hint': None},
     'osb_flux_residual_threshold': {'group': 'osb', 'label': '🎚 OSB Flux Residual Threshold', 'vtype': 'val', 'argtype': 'float', 'default': 0.15, 'choices': None, 'hint': 'decimal'},
@@ -614,7 +616,7 @@ FIELD_GROUPS = {
     'generation': ['temperature', 'top_p', 'top_k', 'max_tokens', 'use_custom_sampling', 'reasoning_effort', 'effort', 'verbosity', 'reading_direction', 'enable_web_search', 'enable_code_execution', 'media_resolution', 'media_resolution_bubbles', 'media_resolution_context', 'image_detail', 'send_full_page_context'],
     'cleaning': ['inpaint_colored_bubbles', 'use_otsu_threshold', 'thresholding_value', 'roi_shrink_px', 'whiteout_conjoined_bubbles', 'upscale_method', 'image_upscale_mode', 'image_upscale_factor', 'jpeg_quality', 'png_compression', 'auto_scale', 'bubble_min_side_pixels', 'context_image_max_side_pixels'],
     'batch': ['parallel_requests', 'batch_parallel_within_pages', 'batch_previous_context_images', 'batch_previous_context_texts', 'retry_failed_once', 'overlap_llm_with_inpaint', 'verbose', 'cpu', 'cleaning_only', 'upscaling_only', 'test_mode'],
-    'osb': ['osb_inpainting_method', 'osb_flux_backend', 'osb_flux_low_vram', 'osb_flux_sdcpp_cache_mode', 'osb_flux_sdcpp_diffusion_quant', 'osb_flux_sdcpp_text_encoder_quant', 'osb_flux_upscale_small_crops', 'osb_flux_group_regions', 'osb_flux_steps', 'osb_flux_luminance_correction', 'osb_flux_residual_threshold', 'osb_seed', 'osb_max_font_size', 'osb_min_font_size', 'osb_use_ligatures', 'osb_outline_width', 'osb_line_spacing', 'osb_use_subpixel', 'osb_font_hinting', 'osb_bbox_expansion', 'osb_render_expansion_narrow', 'osb_render_expansion_tiny', 'osb_render_expansion_aspect_threshold', 'osb_render_expansion_area_threshold', 'osb_text_box_proximity_ratio', 'osb_confidence', 'osb_filter_page_numbers', 'osb_page_filter_margin', 'osb_page_filter_min_area', 'osb_min_area_ignore_ratio', 'osb_min_side_pixels'],
+    'osb': ['osb_inpainting_method', 'osb_flux_backend', 'osb_flux_low_vram', 'osb_flux_sdcpp_cache_mode', 'osb_flux_sdcpp_diffusion_quant', 'osb_flux_sdcpp_text_encoder_quant', 'osb_flux_upscale_small_crops', 'osb_flux_group_regions', 'osb_sfx_skip_inpaint', 'osb_flux_steps', 'osb_flux_luminance_correction', 'osb_flux_residual_threshold', 'osb_seed', 'osb_max_font_size', 'osb_min_font_size', 'osb_use_ligatures', 'osb_outline_width', 'osb_line_spacing', 'osb_use_subpixel', 'osb_font_hinting', 'osb_bbox_expansion', 'osb_render_expansion_narrow', 'osb_render_expansion_tiny', 'osb_render_expansion_aspect_threshold', 'osb_render_expansion_area_threshold', 'osb_text_box_proximity_ratio', 'osb_confidence', 'osb_filter_page_numbers', 'osb_page_filter_margin', 'osb_page_filter_min_area', 'osb_min_area_ignore_ratio', 'osb_min_side_pixels'],
 }
 
 FIELD_GROUP_TITLES = {
@@ -2503,6 +2505,7 @@ CLI_MAPPINGS = {
     "osb_flux_sdcpp_cache_mode": ("--osb-flux-sdcpp-cache-mode", "val"), "osb_flux_sdcpp_diffusion_quant": ("--osb-flux-sdcpp-diffusion-quant", "val"),
     "osb_flux_sdcpp_text_encoder_quant": ("--osb-flux-sdcpp-text-encoder-quant", "val"), "osb_flux_upscale_small_crops": ("--osb-no-flux-upscale-small-crops", "bool_invert"),
     "osb_flux_group_regions": ("--osb-flux-group-regions", "bool_true"), "osb_flux_steps": ("--osb-flux-steps", "val"),
+    "osb_sfx_skip_inpaint": ("--osb-no-sfx-skip-inpaint", "bool_invert"),
     "osb_flux_luminance_correction": ("--osb-no-luminance-correction", "bool_invert"), "osb_flux_residual_threshold": ("--osb-flux-residual-threshold", "val"),
     "osb_seed": ("--osb-seed", "val"), "osb_max_font_size": ("--osb-max-font-size", "val"),
     "osb_min_font_size": ("--osb-min-font-size", "val"), "osb_use_ligatures": ("--osb-use-ligatures", "bool_true"),

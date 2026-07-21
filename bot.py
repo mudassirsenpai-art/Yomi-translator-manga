@@ -485,7 +485,7 @@ def kb_font_hinting_select(cfg):
 
 # ================= Detection Settings Keyboards (YOLO/OCR) =================
 SEG_MODEL_OPTIONS = ["yolo", "sam2", "sam3"]
-BUBBLE_DETECTOR_OPTIONS = ["yolo_1", "yolo_2"]
+BUBBLE_DETECTOR_OPTIONS = ["yolo_1", "yolo_2", "yolo_3"]
 OCR_METHOD_OPTIONS = ["LLM", "manga-ocr", "paddleocr-vl-1.6", "paddleocr-classic", "paddleocr-classic-v5"]
 OCR_METHOD_LABELS = {
     "LLM": "LLM (vision model)",

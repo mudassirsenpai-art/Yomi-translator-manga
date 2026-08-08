@@ -7,8 +7,11 @@ on:
     paths:
       - "bot.py"
       - ".github/workflows/manga-bot.yml"
-  schedule:
-    - cron: "0 */5 * * *"
+  # schedule trigger removed: running on a cron alongside a Codespaces
+  # instance causes two processes polling the same BOT_TOKEN's getUpdates
+  # at once, which Telegram rejects with a conflict error. Use
+  # workflow_dispatch (manual "Run workflow" button) if you need Actions
+  # to run it on demand instead.
 
 concurrency:
   group: manga-bot-service
@@ -46,20 +49,78 @@ jobs:
             libxdamage1 \
             libxcomposite1 \
             libxkbcommon0 \
-            unzip zip ffmpeg poppler-utils
+            unzip zip ffmpeg
 
       - name: Clone & Setup MangaTranslator Core
         run: |
           rm -rf MangaTranslator
-          git clone https://github.com/meangrinch/MangaTranslator.git
+          # Using mudassirsenpai-art's fork (not upstream meangrinch/MangaTranslator)
+          # because it adds Manual Translation Mode (--manual-ocr-checkpoint /
+          # --manual-render-checkpoint / --manual-translations-json), which
+          # upstream doesn't have and which bot.py's Manual mode depends on.
+          # This fork has no version tags, so we track `main` directly - there's
+          # no pinned release to lock to here. If a future upstream/fork update
+          # breaks something, re-check this step first.
+          git clone --branch main --depth 1 https://github.com/mudassirsenpai-art/Custom---made.git MangaTranslator
           cd MangaTranslator
           # PyTorch must be installed explicitly - it is NOT in requirements.txt
-          # because it's hardware-specific (CPU/CUDA/ROCm/MPS). Without this,
-          # `import torch` inside main.py crashes immediately with
-          # ModuleNotFoundError, which silently kills every translation job.
+          # because it's hardware-specific (CPU/CUDA/ROCm/MPS).
           pip install torch==2.11.0 torchvision==0.26.0 --extra-index-url https://download.pytorch.org/whl/cpu
+          # requirements.txt pulls in paddleocr (classic PP-OCRv4, NOT the
+          # paddleocr-vl-1.6 VLM) for the paddleocr-classic OCR method.
           pip install -r requirements.txt
-          pip install Pillow openai pyrogram tgcrypto
+          # PaddlePaddle (CPU build) is required by both the paddleocr-vl-1.6
+          # (VLM) OCR method and the classic paddleocr package pulled in above
+          # (paddleocr-classic method). Like torch, it's hardware-specific and
+          # not in requirements.txt, so without this it gets pulled in lazily
+          # on first use inside the job - which on a CPU Actions runner can
+          # silently take many minutes (large wheel download + install) and
+          # looks exactly like a stuck/frozen job. Installing it up front here
+          # means it's ready before main.py runs.
+          #
+          # Installed from PyPI (default index), not from
+          # paddlepaddle.org.cn/packages/stable/cpu/. That official index
+          # serves wheels from Baidu's bcebos CDN, which rate-limits per
+          # source IP; GitHub Actions runners share IP ranges across many
+          # concurrent jobs worldwide, so that CDN intermittently returns
+          # "HTTP error 429 Too Many Requests" and fails the whole job. PyPI
+          # publishes the identical paddlepaddle==3.3.1 manylinux CPU wheel
+          # (see https://pypi.org/project/paddlepaddle/3.3.1/#files) and is
+          # served from files.pythonhosted.org, a completely separate CDN not
+          # subject to that rate limit, so this is not a fallback/retry - it's
+          # the correct index to use from a shared CI IP in the first place.
+          pip install paddlepaddle==3.3.1
+          # Pillow: image stitching / tiling / PDF packaging
+          # numpy: row-flatness analysis for safe-cut Manhwa tiling
+          # PyMuPDF: pure-Python PDF page extraction (replaces pdftoppm)
+          # openai, pyrogram, tgcrypto: bot runtime deps
+          pip install Pillow numpy openai pyrogram tgcrypto PyMuPDF
+
+      - name: Verify Core Imports
+        run: |
+          python -c "import fitz; import PIL; import numpy; import pyrogram; import tgcrypto; print('core imports OK')"
+          python -c "import paddle; print('paddle OK, version', paddle.__version__)"
+          python -c "import paddleocr; print('paddleocr (classic) OK')"
+          # Import MangaTranslator's own core.ml.model_manager directly (not
+          # through core.image, which would mask the real error behind a
+          # confusing "cannot import name OutsideTextDetector" ImportError).
+          # If this specific import fails, the traceback below is the real
+          # cause - e.g. a missing/incompatible transformers class.
+          cd MangaTranslator && python -c "import sys; sys.path.insert(0, '.'); from core.ml.model_manager import ModelManager, get_model_manager; print('core.ml.model_manager OK'); from core.image.ocr_detection import OutsideTextDetector; print('core.image.ocr_detection OK')"
+          cd ..
+          # Reproduce the EXACT way bot.py invokes main.py: from the repo
+          # root cwd, as "python MangaTranslator/main.py" (not "cd
+          # MangaTranslator && python main.py" like the check above). If the
+          # check above passes but this one fails, the cwd/invocation style
+          # itself is the cause, not the code.
+          python MangaTranslator/main.py --help > /tmp/main_help_output.txt 2>&1
+          MAIN_HELP_EXIT=$?
+          echo "--- python MangaTranslator/main.py --help output (exit $MAIN_HELP_EXIT) ---"
+          cat /tmp/main_help_output.txt
+          if [ $MAIN_HELP_EXIT -ne 0 ]; then
+            echo "::error::python MangaTranslator/main.py --help failed with exit $MAIN_HELP_EXIT - see output above"
+            exit 1
+          fi
 
       - name: Run Telegram Bot
         env:
@@ -67,4 +128,10 @@ jobs:
           API_HASH: ${{ secrets.API_HASH }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           AUTHORIZED_USERS: ${{ secrets.AUTHORIZED_USERS }}
+          # Needed for OSB (Outside Speech Bubble) model download from HF Hub.
+          # Without this, the download is unauthenticated and can hit HF's
+          # anonymous rate limit on GitHub's shared runner IPs, which is what
+          # was surfacing as the earlier "unauthenticated requests" warning.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python bot.py
